@@ -1,8 +1,8 @@
-# nAssembler (v1.0)
+# nasm (v1.0)
 
 An ARM Assembler for the TI-Nspire CX / CX II, running natively on-calc or on a computer.
 
-This is a high-performance C translation of the original Python-based `nassembler` by **lkj**. By moving from Micropython to native C (via Ndless), this version drastically improves assembly speed and introduces a built-in graphical file browser and error-reporting UI for a seamless on-calc development experience.
+This is a high-performance C translation of the original Python-based `nAssembler` by **lkj**. By moving from Micropython to native C (via Ndless), this version drastically improves assembly speed and introduces a built-in graphical file browser and error-reporting UI for a seamless on-calc development experience.
 
 
 ## Features
