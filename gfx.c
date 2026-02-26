@@ -6,8 +6,6 @@
 #include <keys.h>
 #include <libndls.h>
 #include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include "gfx.h"
 
@@ -237,7 +235,6 @@ void gfx_drawstr_clipped(int x, int y, const char *s, uint16_t fg, uint16_t bg,
 
 #define WIN_MIN_W 160
 #define WIN_MAX_W 300
-#define WIN_MIN_H 60
 #define WIN_MAX_H 200
 #define WIN_TITLE_H 13
 #define WIN_BODY_PAD 6
