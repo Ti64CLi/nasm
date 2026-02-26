@@ -1603,58 +1603,6 @@ static int get_size(const char *name, const char *operands, long long address) {
 }
 
 /* ============================================================
- *  Encoding helpers
- * ============================================================ */
-
-/* Macro helper: encode 32-bit big-endian then swap to LE into ByteBuf */
-static void enc32_le(ByteBuf *out, int n, ...) {
-  va_list ap;
-  int offsets[32], lengths[32];
-  unsigned int values[32];
-  int i;
-
-  va_start(ap, n);
-
-  for (i = 0; i < n; i++) {
-    offsets[i] = va_arg(ap, int);
-    lengths[i] = va_arg(ap, int);
-    values[i] = (unsigned int)va_arg(ap, int);
-  }
-
-  va_end(ap);
-
-  unsigned char buf[4];
-
-  encode_32bit_arr(offsets, lengths, values, n, buf);
-  bigendian_to_littleendian(buf, 4);
-  bb_append(out, buf, 4);
-}
-
-/* Same but for 16-bit */
-static void enc16_le(ByteBuf *out, int n, ...) {
-  va_list ap;
-  int offsets[16], lengths[16];
-  unsigned int values[16];
-  int i;
-
-  va_start(ap, n);
-
-  for (i = 0; i < n; i++) {
-    offsets[i] = va_arg(ap, int);
-    lengths[i] = va_arg(ap, int);
-    values[i] = (unsigned int)va_arg(ap, int);
-  }
-
-  va_end(ap);
-
-  unsigned char buf[2];
-
-  encode_16bit_arr(offsets, lengths, values, n, buf);
-  bigendian_to_littleendian_16bit(buf, 2);
-  bb_append(out, buf, 2);
-}
-
-/* ============================================================
  *  Op2 check and encode
  * ============================================================ */
 
