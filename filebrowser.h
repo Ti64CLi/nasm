@@ -10,7 +10,7 @@
  * Up/Down to navigate, Enter to select, Escape to cancel.
  *
  * Returns the full path of the selected file, or NULL if cancelled.
- * The returned pointer is a static buffer – copy it before calling again.
+ * The returned pointer is a static buffer : copy it before calling again.
  */
 const char *filebrowser_select(void);
 

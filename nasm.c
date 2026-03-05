@@ -1,20 +1,53 @@
 /*
- * ARM Assembler - Translated from Python to C
- * Uses only stdio.h and stdlib.h
+ * nasm.c
+ * ARM assembler for TI-Nspire CX / CX II (Ndless)
  */
 
 #include <ctype.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "filebrowser.h"
 #include "gfx.h"
+#include "settings.h"
 
-/* ============================================================
- *  String utilities
- * ============================================================ */
+#define ZEHN_SIGNATURE 0x6e68655a /* "Zehn" in little-endian */
+#define ZEHN_VERSION 1
+
+enum Zehn_flag_type {
+  NDLESS_VERSION_MIN = 0,
+  NDLESS_VERSION_MAX = 1,
+  NDLESS_REVISION_MIN = 2,
+  NDLESS_REVISION_MAX = 3,
+  RUNS_ON_COLOR = 4,
+  RUNS_ON_CLICKPAD = 5,
+  RUNS_ON_TOUCHPAD = 6,
+  RUNS_ON_32MB = 7,
+  EXECUTABLE_NAME = 8,
+  EXECUTABLE_AUTHOR = 9,
+  EXECUTABLE_VERSION = 10,
+  EXECUTABLE_NOTICE = 11,
+  RUNS_ON_HWW = 12,  /* CX II 240x320 screen support */
+  USES_LCD_BLIT = 13 /* Bypasses legacy screen compatibility mode */
+};
+
+typedef struct {
+  uint32_t signature;
+  uint32_t version;
+  uint32_t file_size;
+  uint32_t reloc_count;
+  uint32_t flag_count;
+  uint32_t extra_size;
+  uint32_t alloc_size;
+  uint32_t entry_offset;
+} __attribute__((packed)) Zehn_header;
+
+static uint32_t make_zehn_flag(uint8_t type, uint32_t data) {
+  return ((data & 0xFFFFFF) << 8) | type;
+}
 
 /* Trim leading/trailing whitespace in-place, returns pointer to start */
 static char *strtrim(char *s) {
@@ -124,10 +157,6 @@ static int split_once(const char *s, char sep, char *left, size_t maxleft,
   return 2;
 }
 
-/* ============================================================
- *  Dynamic byte buffer
- * ============================================================ */
-
 typedef struct {
   unsigned char *data;
   size_t len;
@@ -187,12 +216,9 @@ static void bb_copy(ByteBuf *dst, const ByteBuf *src) {
   bb_append(dst, src->data, src->len);
 }
 
-/* ============================================================
- * Error Logging Intercept
- * ============================================================ */
 #define MAX_ERR_LINES 512
 
-static char *g_err_lines[MAX_ERR_LINES];
+static char *g_err_lines[MAX_ERR_LINES + 1];
 static int g_num_err_lines = 0;
 
 static void clear_errors(void) {
@@ -204,8 +230,6 @@ static void clear_errors(void) {
 }
 
 static void add_error(const char *fmt, ...) {
-  /* Use a slightly large buffer to account for tab expansions and long
-   * formatted errors */
   char buf[1024];
   va_list ap;
 
@@ -213,44 +237,15 @@ static void add_error(const char *fmt, ...) {
   vsnprintf(buf, sizeof(buf), fmt, ap);
   va_end(ap);
 
-  char current_line[1024];
-  int curr_idx = 0;
+  printf("%s\n", buf);
 
-  for (int i = 0; buf[i] != '\0'; i++) {
-    /* Stop parsing if we hit the maximum allowed lines */
-    if (g_num_err_lines >= MAX_ERR_LINES)
-      break;
-
-    if (buf[i] == '\n') {
-      /* Terminate the current line and add it to the array */
-      current_line[curr_idx] = '\0';
-      g_err_lines[g_num_err_lines++] = strdup_s(current_line);
-      curr_idx = 0; /* Reset for the next line */
-    } else if (buf[i] == '\t') {
-      /* Expand tabs to 2 spaces (ensure we don't overflow current_line) */
-      if (curr_idx < (int)sizeof(current_line) - 3) {
-        current_line[curr_idx++] = ' ';
-        current_line[curr_idx++] = ' ';
-      }
-    } else {
-      /* Normal characters */
-      if (curr_idx < (int)sizeof(current_line) - 1) {
-        current_line[curr_idx++] = buf[i];
-      }
-    }
-  }
-
-  /* If there is anything left in the buffer after the loop, push it as a final
-   * line */
-  if (curr_idx > 0 && g_num_err_lines < MAX_ERR_LINES) {
-    current_line[curr_idx] = '\0';
-    g_err_lines[g_num_err_lines++] = strdup_s(current_line);
+  if (g_num_err_lines < MAX_ERR_LINES) {
+    g_err_lines[g_num_err_lines++] = strdup_s(buf);
+  } else if (g_num_err_lines == MAX_ERR_LINES) {
+    g_err_lines[g_num_err_lines++] =
+        strdup_s("... [Too many errors, output truncated]");
   }
 }
-
-/* ============================================================
- *  File cache
- * ============================================================ */
 
 #define MAX_FILES 256
 #define MAX_PATH 1024
@@ -455,10 +450,6 @@ static char **get_sourcecode(int *nlines) {
   return lines;
 }
 
-/* ============================================================
- *  Bit manipulation helpers
- * ============================================================ */
-
 static unsigned int rotateleft32(unsigned int n, int r) {
   n &= 0xFFFFFFFFU;
   r %= 32;
@@ -538,10 +529,6 @@ static void bigendian_to_littleendian_16bit(unsigned char *b, size_t len) {
   }
 }
 
-/* ============================================================
- *  Lexical helpers
- * ============================================================ */
-
 static int my_isalnum(char c) {
   return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
          (c >= 'a' && c <= 'z');
@@ -618,10 +605,6 @@ static int str_isdigit_all(const char *s) {
 
   return 1;
 }
-
-/* ============================================================
- *  Immediate value / register / keyword helpers
- * ============================================================ */
 
 static int is_valid_imval(const char *s);
 static int is_shiftname(const char *s);
@@ -1088,10 +1071,6 @@ static int is_private_label(const char *s) {
   return is_directive(s) || is_opname(s) || is_reg(s) || is_otherkeyword(s);
 }
 
-/* ============================================================
- *  Immediate value encoding
- * ============================================================ */
-
 static int is_expressable_imval(const char *s) {
   long long val = imval_to_int(s);
 
@@ -1147,10 +1126,6 @@ static int int_to_signrotimv(long long n, int *sign, int *rot,
 
   return 0;
 }
-
-/* ============================================================
- *  String splitting helpers for operands
- * ============================================================ */
 
 /* Split s by comma into parts. Returns array of strdup'd strings, *n = count.
  * Caller frees. */
@@ -1282,10 +1257,6 @@ static int split_whitespace(const char *s, char *left, size_t maxleft,
 
   return *right ? 2 : 1;
 }
-
-/* ============================================================
- *  PC-relative expressions
- * ============================================================ */
 
 /* Label dictionary */
 #define MAX_LABELS 4096
@@ -1497,10 +1468,6 @@ static long long pcrelative_expression_to_int(const char *s,
   return offset + _aropexpr_to_int(rtrimmed);
 }
 
-/* ============================================================
- *  Directive size
- * ============================================================ */
-
 static int get_directive_size(const char *name, const char *operands,
                               long long address) {
   char u[16];
@@ -1601,10 +1568,6 @@ static int get_size(const char *name, const char *operands, long long address) {
 
   return get_instruction_size(name, operands, address);
 }
-
-/* ============================================================
- *  Op2 check and encode
- * ============================================================ */
 
 static void check_op2(const char *op2, char *errbuf, size_t errmax) {
   int n;
@@ -1906,11 +1869,6 @@ static int encode_op2(const char *op2str, unsigned int *op2field) {
   return iflag;
 }
 
-/* ============================================================
- *  Check and encode functions
- * ============================================================ */
-
-/* --- dataprocop --- */
 static void check_dataprocop(const char *name, const char *operands,
                              char *errbuf, size_t errmax) {
   int n;
@@ -2062,7 +2020,6 @@ static void encode_dataprocop(const char *name, const char *flags,
   free(parts);
 }
 
-/* --- branchop --- */
 static void check_branchop(const char *name, const char *operands,
                            long long address, char *errbuf, size_t errmax) {
   char u[8];
@@ -2187,7 +2144,6 @@ static void encode_branchop(const char *name, const char *condcode,
   }
 }
 
-/* --- psrtransop --- */
 static void check_psrtransop(const char *name, const char *operands,
                              char *errbuf, size_t errmax) {
   errbuf[0] = '\0';
@@ -2414,7 +2370,6 @@ static void encode_swiop(const char *name, const char *condcode,
   bb_append(out, buf, 4);
 }
 
-/* --- miscarithmeticop --- */
 static void check_miscarithmeticop(const char *name, const char *operands,
                                    char *errbuf, size_t errmax) {
   (void)name;
@@ -2470,7 +2425,6 @@ static void encode_miscarithmeticop(const char *name, const char *condcode,
   free(parts);
 }
 
-/* --- coprocregtransop --- */
 static void check_coprocregtransop(const char *name, const char *operands,
                                    char *errbuf, size_t errmax) {
   (void)name;
@@ -2592,7 +2546,6 @@ static void encode_coprocregtransop(const char *name, const char *condcode,
   free(parts);
 }
 
-/* --- mulop --- */
 static void check_mulop(const char *name, const char *operands, char *errbuf,
                         size_t errmax) {
   errbuf[0] = '\0';
@@ -2687,7 +2640,6 @@ static void encode_mulop(const char *name, const char *flags,
   free(parts);
 }
 
-/* --- longmulop --- */
 static void check_longmulop(const char *name, const char *operands,
                             char *errbuf, size_t errmax) {
   (void)name;
@@ -2776,7 +2728,6 @@ static void encode_longmulop(const char *name, const char *flags,
   free(parts);
 }
 
-/* --- address part validation --- */
 static void is_valid_addresspart(int hsflag, const char *addresspart_in,
                                  int tflag, long long address, char *errbuf,
                                  size_t errmax) {
@@ -4373,10 +4324,6 @@ static void encode_directive(const char *name, const char *operands,
   }
 }
 
-/* ============================================================
- *  Sourceline
- * ============================================================ */
-
 typedef struct {
   char line[4096];
   char notcomment[4096];
@@ -4534,13 +4481,17 @@ static void sl_parse_s_suffix(Sourceline *sl) {
 
       /* check if ends with condcode + 'S' */
       size_t onlen = strlen(sl->opname);
-      if (onlen == oplen + 3 && is_condcode(sl->opname + oplen) &&
-          sl->opname[onlen - 1] == 'S') {
-        sl->opname[onlen - 1] = '\0';
-        sl->flags[0] = 'S';
-        sl->flags[1] = '\0';
+      if (onlen == oplen + 3 && sl->opname[onlen - 1] == 'S') {
+        char cc[3];
+        strncpy(cc, sl->opname + oplen, 2);
+        cc[2] = '\0';
 
-        break;
+        if (is_condcode(cc)) {
+          sl->opname[onlen - 1] = '\0';
+          sl->flags[0] = 'S';
+          sl->flags[1] = '\0';
+          break;
+        }
       }
 
       if (onlen == oplen + 1 && sl->opname[onlen - 1] == 'S') {
@@ -4610,20 +4561,23 @@ static void sl_parse_addrmode_suffixes(Sourceline *sl) {
     if (startswith(sl->opname, addrsuffoplist[i])) {
       size_t onlen = strlen(sl->opname), oplen = strlen(addrsuffoplist[i]);
       /* check for condcode + addrmode suffix */
-      if (onlen == oplen + 4 && is_condcode(sl->opname + oplen)) {
-        char am[3];
+      if (onlen == oplen + 4) {
+        char cc[3];
+        strncpy(cc, sl->opname + oplen, 2);
+        cc[2] = '\0';
 
-        strncpy(am, sl->opname + oplen + 2, 2);
-        am[2] = '\0';
+        if (is_condcode(cc)) {
+          char am[3];
+          strncpy(am, sl->opname + oplen + 2, 2);
+          am[2] = '\0';
 
-        for (j = 0; addrmodelist[j]; j++) {
-          if (strcmp(am, addrmodelist[j]) == 0) {
-            strncpy(sl->flags, am, sizeof(sl->flags) - 1);
-            sl->opname[oplen + 2] = '\0'; /* keep condcode temporarily */
-            /* but wait - we still have condcode in opname, strip it later */
-            sl->opname[onlen - 2] = '\0';
-
-            break;
+          for (j = 0; addrmodelist[j]; j++) {
+            if (strcmp(am, addrmodelist[j]) == 0) {
+              strncpy(sl->flags, am, sizeof(sl->flags) - 1);
+              sl->opname[oplen + 2] = '\0'; /* keep condcode temporarily */
+              sl->opname[onlen - 2] = '\0';
+              break;
+            }
           }
         }
       } else if (onlen >= oplen + 2) {
@@ -4720,8 +4674,7 @@ static int sl_parse_namepart(Sourceline *sl) {
   sl_parse_addrmode_suffixes(sl);
   sl_parse_condition_code(sl);
 
-  if (!sl->condcode[0]) { // && is_conditionable(sl->opname)) { /* check with
-                          // flags */
+  if (!sl->condcode[0]) {
     char fn[128];
 
     snprintf(fn, sizeof(fn), "%s%s", sl->opname, sl->flags);
@@ -4900,10 +4853,6 @@ static int sl_assemble(Sourceline *sl) {
 
   return 0;
 }
-
-/* ============================================================
- *  Assembler stages
- * ============================================================ */
 
 typedef struct {
   Sourceline **lines;
@@ -5140,7 +5089,7 @@ static int read_file_and_stage1_parse(const char *infile,
   return 0;
 }
 
-static int assembler(const char *infile, const char *outfile) {
+static int assembler(const char *infile, const char *outfile, int use_zehn) {
   set_sourcepath("");
   num_labels = 0;
 
@@ -5258,33 +5207,52 @@ static int assembler(const char *infile, const char *outfile) {
   FILE *f = fopen(outfile, "wb");
   if (!f) {
     fprintf(stderr, "Cannot open output file '%s'\n", outfile);
-
     cl_free(&code);
-
     return -1;
   }
 
-  unsigned char header[4] = {'P', 'R', 'G', 0};
+  if (use_zehn) {
+    uint32_t exec_size = 0;
+    for (i = 0; i < code.n; i++) {
+      exec_size += code.lines[i]->hexcode.len;
+    }
 
-  fwrite(header, 1, 4, f);
+    uint32_t flags[3];
+    flags[0] = make_zehn_flag(RUNS_ON_COLOR, 1);
+    flags[1] = make_zehn_flag(RUNS_ON_HWW, 1);
+    flags[2] = make_zehn_flag(USES_LCD_BLIT, 1);
+
+    uint32_t flag_count = 3;
+    uint32_t flags_size = flag_count * sizeof(uint32_t);
+
+    Zehn_header zhdr;
+    zhdr.signature = ZEHN_SIGNATURE;
+    zhdr.version = ZEHN_VERSION;
+    zhdr.file_size = sizeof(Zehn_header) + flags_size + exec_size;
+    zhdr.reloc_count = 0;
+    zhdr.flag_count = flag_count;
+    zhdr.extra_size = 0;
+    zhdr.alloc_size = zhdr.file_size;
+    zhdr.entry_offset = 0;
+
+    fwrite(&zhdr, 1, sizeof(Zehn_header), f);
+    fwrite(flags, 1, flags_size, f);
+  } else {
+    unsigned char header[4] = {'P', 'R', 'G', 0};
+    fwrite(header, 1, 4, f);
+  }
 
   for (i = 0; i < code.n; i++) {
     Sourceline *c = code.lines[i];
-
     if (c->hexcode.len > 0)
       fwrite(c->hexcode.data, 1, c->hexcode.len, f);
   }
 
   fclose(f);
-
   cl_free(&code);
 
   return 0;
 }
-
-/* ============================================================
- *  Nspire entry point
- * ============================================================ */
 
 /*
  * Build the output path:
@@ -5316,39 +5284,85 @@ int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
 
-  /* Browse for the source file.
-     filebrowser_select() calls gfx_init() internally and leaves the
-     LCD open on success so we can reuse it for the result window.   */
-  const char *infile = filebrowser_select();
-  if (!infile)
-    return 0; /* user cancelled – LCD already deinited  */
+  settings_load();
+
+  gfx_init();
+
+  const char *infile = NULL;
+
+  while (1) {
+    infile = filebrowser_select();
+    if (!infile) {
+      gfx_deinit();
+      return 0;
+    }
+
+    int is_valid_ext = 0;
+    char ext_tns[64], ext_bare[64];
+
+    snprintf(ext_tns, sizeof(ext_tns), ".%s.tns", g_settings.asm_extension);
+    snprintf(ext_bare, sizeof(ext_bare), ".%s", g_settings.asm_extension);
+
+    size_t in_len = strlen(infile);
+
+    if (in_len >= strlen(ext_tns) &&
+        strcasecmp_s(infile + in_len - strlen(ext_tns), ext_tns) == 0) {
+      is_valid_ext = 1;
+    } else if (in_len >= strlen(ext_bare) &&
+               strcasecmp_s(infile + in_len - strlen(ext_bare), ext_bare) ==
+                   0) {
+      is_valid_ext = 1;
+    }
+
+    if (!is_valid_ext) {
+      const char *warn_lines[] = {"The selected file does not match",
+                                  "your configured ASM extension.",
+                                  "",
+                                  "It might not be a valid source file.",
+                                  "",
+                                  "Do you want to continue?"};
+
+      int ans = gfx_window_confirm2("   Warning", warn_lines, 6, "Continue",
+                                    "Cancel");
+
+      if (ans == 1) {
+        continue;
+      }
+    }
+
+    break;
+  }
 
   char outfile[MAX_PATH];
   make_outpath(infile, outfile, MAX_PATH);
 
-  int ret = assembler(infile, outfile);
+  const char *fmt_lines[] = {"Select output binary format:", "",
+                             "Zehn: Native CX II support (Recommended)",
+                             "PRG: Legacy Nspire compatibility mode (Default)"};
 
-  /* Free file cache */
-  int i;
-  for (i = 0; i < num_cached_files; i++)
+  int fmt_ans =
+      gfx_window_confirm2("Output Format", fmt_lines, 4, "Zehn", "PRG");
+  int use_zehn = (fmt_ans == 0) ? 1 : 0;
+
+  int ret = assembler(infile, outfile, use_zehn);
+
+  for (int i = 0; i < num_cached_files; i++) {
     free(file_cache[i].data);
+    file_cache[i].data = NULL;
+  }
+  num_cached_files = 0;
 
-  /* Show result window using the shared gfx API.
-     The framebuffer still holds the file-browser scene as a backdrop. */
   if (ret == 0) {
     char line1[MAX_PATH + 16];
-
     snprintf(line1, sizeof(line1), "Output: %s", outfile);
-
     const char *lines[] = {"Assembly successful.", line1};
-
-    gfx_window_alert("Assembler", lines, 2, "OK");
+    gfx_window_alert("NASM", lines, 2, "OK", 0);
   } else {
-    gfx_window_scrolltext("Assembler Errors", (const char **)g_err_lines,
+    gfx_window_scrolltext("Errors Found", (const char **)g_err_lines,
                           g_num_err_lines, "Close");
   }
 
+  clear_errors();
   gfx_deinit();
-
   return (ret == 0) ? 0 : 1;
 }

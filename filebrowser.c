@@ -14,17 +14,20 @@
 
 #include "filebrowser.h"
 #include "gfx.h"
+#include "settings.h"
 
 /* ------------------------------------------------------------------ */
 /*  Colours used by the browser                                       */
 /* ------------------------------------------------------------------ */
-#define COL_BG GFX_COL_BLACK
-#define COL_FG GFX_COL_WHITE
-#define COL_HDR GFX_COL_DARK_BLUE
-#define COL_SEL_BG GFX_COL_GREEN
-#define COL_SEL_FG GFX_COL_BLACK
-#define COL_DIR_FG GFX_COL_ORANGE
-#define COL_HINT_FG GFX_COL_GREY
+#define COL_BG g_default_theme.bg
+#define COL_FG g_default_theme.fg
+#define COL_HDR g_default_theme.title_bg
+#define COL_HDR_FG g_default_theme.title_fg
+#define COL_SEL_BG g_default_theme.accent
+#define COL_SEL_FG g_default_theme.accent_text
+#define COL_DIR_FG g_default_theme.accent
+#define COL_HINT_FG g_default_theme.border_light
+#define COL_BORDER g_default_theme.border_light
 
 /* ------------------------------------------------------------------ */
 /*  Layout                                                            */
@@ -93,6 +96,11 @@ static int entry_cmp(const void *a, const void *b) {
   return tolower((unsigned char)*na) - tolower((unsigned char)*nb);
 }
 
+/* Build the suffix we filter on: ".<ext>.tns", e.g. ".asm.tns" */
+static void make_filter_suffix(char *buf, int bufsz) {
+  snprintf(buf, bufsz, ".%s.tns", g_settings.asm_extension);
+}
+
 static void load_dir(const char *path, int filter_asm) {
   DIR *d = opendir(path);
 
@@ -101,9 +109,8 @@ static void load_dir(const char *path, int filter_asm) {
   if (!d)
     return;
 
-  /* ".." entry unless at root */
-  if (strcmp(path, "/documents") != 0) {
-    strncpy(entries[0].name, "..", MAX_NAME - 1);
+  if (strcmp(path, "/") != 0) {
+    strncpy(entries[0].name, "../  (parent)", MAX_NAME - 1);
     entries[0].name[MAX_NAME - 1] = '\0';
     strncpy(entries[0].fullpath, path, MAX_PATH - 1);
     entries[0].fullpath[MAX_PATH - 1] = '\0';
@@ -112,14 +119,16 @@ static void load_dir(const char *path, int filter_asm) {
     if (slash && slash != entries[0].fullpath)
       *slash = '\0';
     else
-      strncpy(entries[0].fullpath, "/documents", MAX_PATH - 1);
+      strncpy(entries[0].fullpath, "/", MAX_PATH - 1);
 
     entries[0].is_dir = 1;
     num_entries = 1;
   }
 
-  struct dirent *de;
+  char filter_suffix[48];
+  make_filter_suffix(filter_suffix, sizeof(filter_suffix));
 
+  struct dirent *de;
   while ((de = readdir(d)) != NULL && num_entries < MAX_ENTRIES) {
     if (de->d_name[0] == '.')
       continue;
@@ -132,7 +141,7 @@ static void load_dir(const char *path, int filter_asm) {
     if (stat(fullpath, &st) == 0 && S_ISDIR(st.st_mode))
       is_dir = 1;
 
-    if (!is_dir && filter_asm && !str_endswith_ci(de->d_name, ".asm.tns"))
+    if (!is_dir && filter_asm && !str_endswith_ci(de->d_name, filter_suffix))
       continue;
 
     strncpy(entries[num_entries].name, de->d_name, MAX_NAME - 1);
@@ -152,79 +161,63 @@ static void load_dir(const char *path, int filter_asm) {
 /* ------------------------------------------------------------------ */
 /*  Rendering                                                         */
 /* ------------------------------------------------------------------ */
-static void render(const char *cur_path, int cursor, int scroll,
-                   int filter_asm) {
+static void render(const char *path, int cursor, int scroll, int filter_asm) {
   gfx_fillrect(0, 0, GFX_W, GFX_H, COL_BG);
 
-  /* Header */
   gfx_fillrect(0, 0, GFX_W, HEADER_H, COL_HDR);
-  const char *disp = cur_path;
-  int max_chars = (GFX_W - 4) / GFX_CHAR_W;
-  int plen = (int)strlen(cur_path);
 
-  if (plen > max_chars)
-    disp = cur_path + plen - max_chars;
+  char disp_path[MAX_PATH + 2];
+  const char *clean_path = path;
+  while (clean_path[0] == '/' && clean_path[1] == '/')
+    clean_path++;
+  snprintf(disp_path, sizeof(disp_path), "/%s", clean_path);
 
-  gfx_drawstr(2, 3, disp, COL_FG, COL_HDR);
+  gfx_drawstr_clipped(4, (HEADER_H - GFX_FONT_H) / 2, disp_path, COL_HDR_FG,
+                      COL_HDR, GFX_W - 8);
 
-  /* File rows */
-  int i;
-  for (i = 0; i < ROWS_VISIBLE; i++) {
+  for (int i = 0; i < ROWS_VISIBLE; i++) {
     int idx = scroll + i;
-    int row_y = LIST_Y + i * ROW_H;
+    if (idx >= num_entries)
+      break;
 
-    if (idx < num_entries) {
-      int sel = (idx == cursor);
-      uint16_t fg =
-          sel ? COL_SEL_FG : (entries[idx].is_dir ? COL_DIR_FG : COL_FG);
-      uint16_t bg = sel ? COL_SEL_BG : COL_BG;
+    int y = LIST_Y + i * ROW_H;
+    int is_sel = (idx == cursor);
 
-      gfx_fillrect(LIST_X, row_y, LIST_W, ROW_H - 1, bg);
+    uint16_t bg = is_sel ? COL_SEL_BG : COL_BG;
+    uint16_t fg =
+        is_sel ? COL_SEL_FG : (entries[idx].is_dir ? COL_DIR_FG : COL_FG);
 
-      char display[MAX_NAME + 3];
-
-      if (entries[idx].is_dir && strcmp(entries[idx].name, "..") != 0) {
-        display[0] = '[';
-        strncpy(display + 1, entries[idx].name, MAX_NAME);
-        display[MAX_NAME] = '\0';
-        size_t dl = strlen(display);
-        display[dl] = ']';
-        display[dl + 1] = '\0';
-      } else {
-        strncpy(display, entries[idx].name, MAX_NAME + 1);
-        display[MAX_NAME + 1] = '\0';
-      }
-
-      gfx_drawstr_clipped(LIST_X + 2, row_y + 1, display, fg, bg, LIST_W - 4);
-    } else {
-      gfx_fillrect(LIST_X, row_y, LIST_W, ROW_H - 1, COL_BG);
-    }
+    gfx_fillrect(0, y, GFX_W, ROW_H, bg);
+    gfx_drawstr_clipped(8, y + 1, entries[idx].name, fg, bg, GFX_W - 12);
   }
 
-  /* Scrollbar */
   if (num_entries > ROWS_VISIBLE) {
-    int total = LIST_H;
-    int bar_h = total * ROWS_VISIBLE / num_entries;
-    if (bar_h < 4)
-      bar_h = 4;
-
-    int bar_y =
-        LIST_Y + (total - bar_h) * scroll / (num_entries - ROWS_VISIBLE);
-
-    gfx_fillrect(GFX_W - 3, LIST_Y, 2, total, COL_HDR);
-    gfx_fillrect(GFX_W - 3, bar_y, 2, bar_h, COL_FG);
+    int bt = LIST_H;
+    int vis = ROWS_VISIBLE;
+    int bh = bt * vis / num_entries;
+    if (bh < 4)
+      bh = 4;
+    int ms = num_entries - vis;
+    int by = LIST_Y + (bt - bh) * scroll / (ms > 0 ? ms : 1);
+    gfx_fillrect(GFX_W - 4, LIST_Y, 3, bt, g_default_theme.item_bg);
+    gfx_fillrect(GFX_W - 4, by, 3, bh, COL_BORDER);
   }
 
-  /* Hint bar */
-  int hy = GFX_H - HINT_H;
+  gfx_fillrect(0, GFX_H - HINT_H, GFX_W, HINT_H, COL_BG);
+  gfx_hline(0, GFX_H - HINT_H - 1, GFX_W, COL_BORDER);
 
-  gfx_fillrect(0, hy, GFX_W, HINT_H, COL_HDR);
+  char hint_buf[128];
+  const char *hint;
+  if (filter_asm) {
+    hint = "Tab: show all files";
+  } else {
+    snprintf(hint_buf, sizeof(hint_buf), "Tab: show *.%s.tns",
+             g_settings.asm_extension);
+    hint = hint_buf;
+  }
 
-  char hint[64];
-  snprintf(hint, sizeof(hint), "%sEnter:open  Esc:quit",
-           filter_asm ? "Tab:all  " : "Tab:.asm ");
-
-  gfx_drawstr(2, hy + 1, hint, COL_HINT_FG, COL_HDR);
+  gfx_drawstr_clipped(4, GFX_H - HINT_H + 1, hint, COL_HINT_FG, COL_BG,
+                      GFX_W - 8);
 
   gfx_flip();
 }
@@ -232,11 +225,20 @@ static void render(const char *cur_path, int cursor, int scroll,
 /* ------------------------------------------------------------------ */
 /*  Key helpers                                                       */
 /* ------------------------------------------------------------------ */
-static void wait_debounce(const t_key key) {
+static void wait_key_release_all(void) {
+  while (any_key_pressed()) {
+    msleep(20);
+    idle();
+  }
+}
+
+static void wait_debounce(t_key key) {
   while (isKeyPressed(key)) {
     msleep(15);
+    idle();
   }
   msleep(30);
+  idle();
 }
 
 /* ------------------------------------------------------------------ */
@@ -245,79 +247,88 @@ static void wait_debounce(const t_key key) {
 static char result_path[MAX_PATH];
 
 const char *filebrowser_select(void) {
-  gfx_init();
-
-  int filter_asm = 1;
   char cur_path[MAX_PATH];
   strncpy(cur_path, "/documents", MAX_PATH - 1);
   cur_path[MAX_PATH - 1] = '\0';
+  int cursor = 0;
+  int scroll = 0;
+  int filter_asm = 1;
 
-  int cursor = 0, scroll = 0;
   load_dir(cur_path, filter_asm);
   render(cur_path, cursor, scroll, filter_asm);
 
   while (any_key_pressed()) {
     msleep(20);
+    idle();
   }
 
   for (;;) {
-    if (isKeyPressed(KEY_NSPIRE_UP)) {
+    NavAction nav = gfx_poll_nav();
+    if (nav == NAV_NONE) {
+      msleep(16);
+      idle();
+      continue;
+    }
+
+    if (nav == NAV_ESC) {
+      while (any_key_pressed()) {
+        msleep(20);
+        idle();
+      }
+      return NULL;
+    } else if (nav == NAV_UP) {
       if (cursor > 0) {
         cursor--;
 
         if (cursor < scroll)
           scroll = cursor;
       }
-
-      render(cur_path, cursor, scroll, filter_asm);
-      wait_debounce(KEY_NSPIRE_UP);
-    } else if (isKeyPressed(KEY_NSPIRE_DOWN)) {
+    } else if (nav == NAV_DOWN) {
       if (cursor < num_entries - 1) {
         cursor++;
 
         if (cursor >= scroll + ROWS_VISIBLE)
           scroll = cursor - ROWS_VISIBLE + 1;
       }
-
-      render(cur_path, cursor, scroll, filter_asm);
-      wait_debounce(KEY_NSPIRE_DOWN);
-    } else if (isKeyPressed(KEY_NSPIRE_TAB)) {
+    } else if (nav == NAV_TAB) {
       filter_asm = !filter_asm;
       cursor = 0;
       scroll = 0;
 
       load_dir(cur_path, filter_asm);
-      render(cur_path, cursor, scroll, filter_asm);
-      wait_debounce(KEY_NSPIRE_TAB);
-    } else if (isKeyPressed(KEY_NSPIRE_ENTER) ||
-               isKeyPressed(KEY_NSPIRE_CLICK)) {
+    } else if (nav == NAV_ENTER) {
       if (num_entries > 0) {
         if (entries[cursor].is_dir) {
-          strncpy(cur_path, entries[cursor].fullpath, MAX_PATH - 1);
+          if (strcmp(entries[cursor].name, "../  (parent)") == 0) {
+            char *slash = strrchr(cur_path, '/');
+            if (slash && slash != cur_path)
+              *slash = '\0';
+            else
+              strncpy(cur_path, "/", MAX_PATH - 1);
+          } else {
+            if (strcmp(cur_path, "/") == 0) {
+              snprintf(cur_path, MAX_PATH, "/%s", entries[cursor].name);
+            } else {
+              snprintf(cur_path + strlen(cur_path), MAX_PATH - strlen(cur_path),
+                       "/%s", entries[cursor].name);
+            }
+          }
           cursor = 0;
           scroll = 0;
 
           load_dir(cur_path, filter_asm);
-          render(cur_path, cursor, scroll, filter_asm);
         } else {
           strncpy(result_path, entries[cursor].fullpath, MAX_PATH - 1);
 
           result_path[MAX_PATH - 1] = '\0';
-
-          /* Do NOT call gfx_deinit() here: the caller reuses
-             the LCD for the result window, then deinits.    */
+          while (any_key_pressed()) {
+            msleep(20);
+            idle();
+          }
           return result_path;
         }
       }
-
-      wait_debounce(KEY_NSPIRE_ENTER);
-    } else if (isKeyPressed(KEY_NSPIRE_ESC)) {
-      gfx_deinit();
-
-      return NULL;
-    } else {
-      msleep(20);
-      idle();
     }
+    render(cur_path, cursor, scroll, filter_asm);
   }
 }
