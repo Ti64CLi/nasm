@@ -1,0 +1,9 @@
+# build artifacts
+*.o
+*.d
+*.elf
+*.zehn
+/nasm.tns
+
+# test harness output
+tests/build/
