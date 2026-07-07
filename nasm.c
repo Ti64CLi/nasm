@@ -10,9 +10,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bytebuf.h"
 #include "filebrowser.h"
 #include "gfx.h"
+#include "optab.h"
 #include "settings.h"
+#include "util.h"
 
 #define ZEHN_SIGNATURE 0x6e68655a /* "Zehn" in little-endian */
 #define ZEHN_VERSION 1
@@ -47,173 +50,6 @@ typedef struct {
 
 static uint32_t make_zehn_flag(uint8_t type, uint32_t data) {
   return ((data & 0xFFFFFF) << 8) | type;
-}
-
-/* Trim leading/trailing whitespace in-place, returns pointer to start */
-static char *strtrim(char *s) {
-  char *end;
-
-  while (isspace((unsigned char)*s))
-    s++;
-
-  if (*s == 0)
-    return s;
-
-  end = s + strlen(s) - 1;
-
-  while (end > s && isspace((unsigned char)*end))
-    end--;
-
-  end[1] = '\0';
-
-  return s;
-}
-
-/* Duplicate a string */
-static char *strdup_s(const char *s) {
-  size_t len = strlen(s) + 1;
-
-  char *d = malloc(len);
-  if (d)
-    memcpy(d, s, len);
-
-  return d;
-}
-
-/* Case-insensitive string compare */
-static int strcasecmp_s(const char *a, const char *b) {
-  while (*a && *b) {
-    int d = tolower((unsigned char)*a) - tolower((unsigned char)*b);
-    if (d != 0)
-      return d;
-
-    a++;
-    b++;
-  }
-
-  return tolower((unsigned char)*a) - tolower((unsigned char)*b);
-}
-
-/* Convert string to uppercase into dst (dst must be large enough) */
-static void strupper(const char *src, char *dst, size_t maxlen) {
-  size_t i;
-  for (i = 0; i < maxlen - 1 && src[i]; i++)
-    dst[i] = (char)toupper((unsigned char)src[i]);
-
-  dst[i] = '\0';
-}
-
-/* startswith */
-static int startswith(const char *s, const char *prefix) {
-  return strncmp(s, prefix, strlen(prefix)) == 0;
-}
-
-/* endswith */
-static int endswith(const char *s, const char *suffix) {
-  size_t sl = strlen(s), pl = strlen(suffix);
-  if (pl > sl)
-    return 0;
-
-  return strcmp(s + sl - pl, suffix) == 0;
-}
-
-/* Find first occurrence of any char in chars within s, return index or -1 */
-static int find_first_of(const char *s, const char *chars) {
-  int i;
-  for (i = 0; s[i]; i++)
-    if (strchr(chars, s[i]))
-      return i;
-
-  return -1;
-}
-
-/* Split string by first occurrence of sep, store left in left (maxleft), right
- * in right (maxright) */
-/* Returns number of parts (1 or 2) */
-static int split_once(const char *s, char sep, char *left, size_t maxleft,
-                      char *right, size_t maxright) {
-  const char *p = strchr(s, sep);
-  if (!p) {
-    strncpy(left, s, maxleft - 1);
-
-    left[maxleft - 1] = '\0';
-    right[0] = '\0';
-
-    return 1;
-  }
-
-  size_t llen = p - s;
-  if (llen >= maxleft)
-    llen = maxleft - 1;
-
-  memcpy(left, s, llen);
-
-  left[llen] = '\0';
-
-  strncpy(right, p + 1, maxright - 1);
-
-  right[maxright - 1] = '\0';
-
-  return 2;
-}
-
-typedef struct {
-  unsigned char *data;
-  size_t len;
-  size_t cap;
-} ByteBuf;
-
-static void bb_init(ByteBuf *b) {
-  b->data = NULL;
-  b->len = 0;
-  b->cap = 0;
-}
-
-static void bb_free(ByteBuf *b) {
-  free(b->data);
-
-  b->data = NULL;
-  b->len = b->cap = 0;
-}
-
-static int bb_push(ByteBuf *b, unsigned char c) {
-  if (b->len >= b->cap) {
-    size_t newcap = b->cap ? b->cap * 2 : 16;
-    unsigned char *nd = realloc(b->data, newcap);
-
-    if (!nd)
-      return -1;
-
-    b->data = nd;
-    b->cap = newcap;
-  }
-
-  b->data[b->len++] = c;
-
-  return 0;
-}
-
-static int bb_append(ByteBuf *b, const unsigned char *src, size_t n) {
-  size_t i;
-  for (i = 0; i < n; i++)
-    if (bb_push(b, src[i]) < 0)
-      return -1;
-
-  return 0;
-}
-
-static int bb_append_zeros(ByteBuf *b, size_t n) {
-  size_t i;
-  for (i = 0; i < n; i++)
-    if (bb_push(b, 0) < 0)
-      return -1;
-
-  return 0;
-}
-
-static void bb_copy(ByteBuf *dst, const ByteBuf *src) {
-  bb_init(dst);
-  bb_append(dst, src->data, src->len);
 }
 
 #define MAX_ERR_LINES 512
@@ -362,6 +198,12 @@ static long add_file(const char *path, char *absp, size_t absp_size) {
   long sz = ftell(f);
   rewind(f);
 
+  if (sz < 0) {
+    fclose(f);
+
+    return -1;
+  }
+
   unsigned char *buf = malloc(sz + 1);
   if (!buf) {
     fclose(f);
@@ -369,7 +211,13 @@ static long add_file(const char *path, char *absp, size_t absp_size) {
     return -1;
   }
 
-  fread(buf, 1, sz, f);
+  if (fread(buf, 1, sz, f) != (size_t)sz) {
+    free(buf);
+    fclose(f);
+
+    return -1;
+  }
+
   fclose(f);
 
   buf[sz] = '\0';
@@ -450,227 +298,8 @@ static char **get_sourcecode(int *nlines) {
   return lines;
 }
 
-static unsigned int rotateleft32(unsigned int n, int r) {
-  n &= 0xFFFFFFFFU;
-  r %= 32;
-  if (r == 0)
-    return n;
-
-  return ((n << r) | (n >> (32 - r))) & 0xFFFFFFFFU;
-}
-
-/* encode_32bit: l is array of {offset, length, value} triples, n is number of
- * triples */
-static void encode_32bit_arr(const int *offsets, const int *lengths,
-                             const unsigned int *values, int n,
-                             unsigned char out[4]) {
-  unsigned int word = 0;
-
-  int i;
-  for (i = 0; i < n; i++) {
-    unsigned int mask =
-        (lengths[i] == 32) ? 0xFFFFFFFFU : ((1U << lengths[i]) - 1U);
-
-    word |= (values[i] & mask) << offsets[i];
-  }
-
-  out[0] = (word >> 24) & 0xFF;
-  out[1] = (word >> 16) & 0xFF;
-  out[2] = (word >> 8) & 0xFF;
-  out[3] = word & 0xFF;
-}
-
-static void encode_16bit_arr(const int *offsets, const int *lengths,
-                             const unsigned int *values, int n,
-                             unsigned char out[2]) {
-  unsigned int word = 0;
-
-  int i;
-  for (i = 0; i < n; i++) {
-    unsigned int mask =
-        (lengths[i] == 16) ? 0xFFFFU : ((1U << lengths[i]) - 1U);
-    word |= (values[i] & mask) << offsets[i];
-  }
-
-  out[0] = (word >> 8) & 0xFF;
-  out[1] = word & 0xFF;
-}
-
-static void bigendian_to_littleendian(unsigned char *b, size_t len) {
-  /* swap 4-byte chunks */
-  size_t i;
-
-  if (len % 4 != 0)
-    return;
-
-  for (i = 0; i < len; i += 4) {
-    unsigned char tmp;
-    tmp = b[i];
-
-    b[i] = b[i + 3];
-    b[i + 3] = tmp;
-    tmp = b[i + 1];
-    b[i + 1] = b[i + 2];
-    b[i + 2] = tmp;
-  }
-}
-
-static void bigendian_to_littleendian_16bit(unsigned char *b, size_t len) {
-  size_t i;
-
-  if (len % 2 != 0)
-    return;
-
-  for (i = 0; i < len; i += 2) {
-    unsigned char tmp = b[i];
-
-    b[i] = b[i + 1];
-    b[i + 1] = tmp;
-  }
-}
-
-static int my_isalnum(char c) {
-  return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
-         (c >= 'a' && c <= 'z');
-}
-
-static int str_isalnum(const char *s) {
-  if (!s || !*s)
-    return 0;
-
-  while (*s) {
-    if (!my_isalnum(*s))
-      return 0;
-
-    s++;
-  }
-
-  return 1;
-}
-
-static int str_isxdigit(const char *s) {
-  if (!s || !*s)
-    return 0;
-
-  while (*s) {
-    char c = *s;
-    if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') ||
-          (c >= 'a' && c <= 'f')))
-      return 0;
-
-    s++;
-  }
-
-  return 1;
-}
-
-static int str_isoctdigit(const char *s) {
-  if (!s || !*s)
-    return 0;
-
-  while (*s) {
-    if (*s < '0' || *s > '7')
-      return 0;
-
-    s++;
-  }
-
-  return 1;
-}
-
-static int str_isbindigit(const char *s) {
-  if (!s || !*s)
-    return 0;
-
-  while (*s) {
-    if (*s != '0' && *s != '1')
-      return 0;
-
-    s++;
-  }
-
-  return 1;
-}
-
-static int str_isdigit_all(const char *s) {
-  if (!s || !*s)
-    return 0;
-
-  while (*s) {
-    if (!isdigit((unsigned char)*s))
-      return 0;
-
-    s++;
-  }
-
-  return 1;
-}
-
 static int is_valid_imval(const char *s);
-static int is_shiftname(const char *s);
-static int is_reg(const char *s);
-static int is_directive(const char *s);
-static int is_opname(const char *s);
-
-static int is_shiftname(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "ASL") == 0 || strcmp(u, "LSL") == 0 ||
-         strcmp(u, "LSR") == 0 || strcmp(u, "ASR") == 0 ||
-         strcmp(u, "ROR") == 0;
-}
-
-static int is_coprocreg(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  const char *list[] = {"C0",  "C1",  "C2",  "C3",  "C4",  "C5",
-                        "C6",  "C7",  "C8",  "C9",  "C10", "C11",
-                        "C12", "C13", "C14", "C15", NULL};
-
-  int i;
-  for (i = 0; list[i]; i++)
-    if (strcmp(u, list[i]) == 0)
-      return 1;
-
-  return 0;
-}
-
-static int is_coproc(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  const char *list[] = {"P0",  "P1",  "P2",  "P3",  "P4",  "P5",
-                        "P6",  "P7",  "P8",  "P9",  "P10", "P11",
-                        "P12", "P13", "P14", "P15", NULL};
-
-  int i;
-  for (i = 0; list[i]; i++)
-    if (strcmp(u, list[i]) == 0)
-      return 1;
-
-  return 0;
-}
-
-static int is_psr(const char *s) {
-  char u[16];
-
-  strupper(s, u, sizeof(u));
-
-  const char *list[] = {"CPSR",     "SPSR",     "CPSR_ALL", "SPSR_ALL",
-                        "SPSR_FLG", "CPSR_FLG", NULL};
-
-  int i;
-  for (i = 0; list[i]; i++)
-    if (strcmp(u, list[i]) == 0)
-      return 1;
-
-  return 0;
-}
+static int eval_label_expression(const char *s, long long *out);
 
 static int is_valid_imval(const char *s) {
   if (!s || strlen(s) < 2)
@@ -689,8 +318,7 @@ static int is_valid_imval(const char *s) {
 
   if (strcmp(t, "#0") == 0)
     res = 1;
-  else if (t[1] == '\'' && t[strlen(t) - 1] == '\'' && strlen(t) == 4 &&
-           (unsigned char)t[2] <= 255)
+  else if (t[1] == '\'' && t[strlen(t) - 1] == '\'' && strlen(t) == 4)
     res = 1;
   else if (startswith(t, "#0x") && strlen(t) >= 4 && str_isxdigit(t + 3))
     res = 1;
@@ -700,6 +328,13 @@ static int is_valid_imval(const char *s) {
     res = 1;
   else if (t[1] != '0' && str_isdigit_all(t + 1))
     res = 1;
+  else {
+    /* named constant (EQU) or label expression */
+    long long lv;
+
+    if (eval_label_expression(t + 1, &lv))
+      res = 1;
+  }
 
   free(t);
 
@@ -730,8 +365,14 @@ static long long imval_to_int(const char *s) {
     val = strtoll(t + 3, NULL, 2);
   else if (startswith(t, "#0") && strlen(t) > 2)
     val = strtoll(t + 2, NULL, 8);
-  else
-    val = strtoll(t + 1, NULL, 10);
+  else {
+    long long lv;
+
+    if (eval_label_expression(t + 1, &lv))
+      val = lv;
+    else
+      val = strtoll(t + 1, NULL, 10);
+  }
 
   free(t);
 
@@ -752,323 +393,6 @@ static long long numeric_literal_to_int(const char *s) {
   snprintf(tmp, sizeof(tmp), "#%s", s);
 
   return imval_to_int(tmp);
-}
-
-static int get_reg_num(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  const char *names[] = {"R0", "R1",  "R2", "R3",  "R4",  "R5",  "R6",
-                         "R7", "R8",  "R9", "R10", "R11", "R12", "R13",
-                         "SP", "R14", "LR", "R15", "PC",  NULL};
-  const int nums[] = {0,  1,  2,  3,  4,  5,  6,  7,  8, 9,
-                      10, 11, 12, 13, 13, 14, 14, 15, 15};
-
-  int i;
-  for (i = 0; names[i]; i++)
-    if (strcmp(u, names[i]) == 0)
-      return nums[i];
-
-  return -1;
-}
-
-static int is_reg(const char *s) { return get_reg_num(s) != -1; }
-
-static int get_condcode_value(const char *s) {
-  char u[4];
-
-  strupper(s, u, sizeof(u));
-
-  const char *names[] = {"EQ", "NE", "HS", "CS", "LO", "CC", "MI", "PL", "VS",
-                         "VC", "HI", "LS", "GE", "LT", "GT", "LE", "AL", NULL};
-  const int vals[] = {0, 1, 2, 2, 3, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
-
-  int i;
-  for (i = 0; names[i]; i++)
-    if (strcmp(u, names[i]) == 0)
-      return vals[i];
-
-  return -1;
-}
-
-static int is_condcode(const char *s) { return get_condcode_value(s) != -1; }
-
-static int is_preasm_directive(const char *s) {
-  char u[16];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "GET") == 0 || strcmp(u, "INCLUDE") == 0;
-}
-
-static int is_directive(const char *s) {
-  char u[16];
-
-  strupper(s, u, sizeof(u));
-
-  const char *list[] = {"DCD",   "DCDU", "DCW",    "DCWU",
-                        "ALIGN", "DCB",  "INCBIN", NULL};
-
-  int i;
-  for (i = 0; list[i]; i++)
-    if (strcmp(u, list[i]) == 0)
-      return 1;
-
-  return 0;
-}
-
-static int is_dataproc_fullop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  const char *list[] = {"ADC", "ADD", "RSB", "RSC", "SBC", "SUB",
-                        "AND", "BIC", "EOR", "ORR", NULL};
-
-  int i;
-  for (i = 0; list[i]; i++)
-    if (strcmp(u, list[i]) == 0)
-      return 1;
-
-  return 0;
-}
-
-static int is_dataproc_testop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "CMP") == 0 || strcmp(u, "CMN") == 0 ||
-         strcmp(u, "TEQ") == 0 || strcmp(u, "TST") == 0;
-}
-
-static int is_dataproc_movop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "MOV") == 0 || strcmp(u, "MVN") == 0;
-}
-
-static int get_dataprocop_num(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  const char *names[] = {"ADC", "ADD", "RSB", "RSC", "SBC", "SUB",
-                         "AND", "BIC", "EOR", "ORR", "CMP", "CMN",
-                         "TEQ", "TST", "MOV", "MVN", NULL};
-  const int vals[] = {5, 4, 3, 7, 6, 2, 0, 14, 1, 12, 10, 11, 9, 8, 13, 15};
-
-  int i;
-  for (i = 0; names[i]; i++)
-    if (strcmp(u, names[i]) == 0)
-      return vals[i];
-
-  return -1;
-}
-
-static int is_dataprocop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  const char *list[] = {"ADC",  "ADD",  "RSB",  "RSC",  "SBC",  "SUB",
-                        "AND",  "BIC",  "EOR",  "ORR",  "CMP",  "CMN",
-                        "TEQ",  "TST",  "MOV",  "MVN",  "ADCS", "ADDS",
-                        "RSBS", "RSCS", "SBCS", "SUBS", "ANDS", "BICS",
-                        "EORS", "ORRS", "MOVS", "MVNS", NULL};
-
-  int i;
-  for (i = 0; list[i]; i++)
-    if (strcmp(u, list[i]) == 0)
-      return 1;
-
-  return 0;
-}
-
-static int is_branchop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "BX") == 0 || strcmp(u, "B") == 0 || strcmp(u, "BL") == 0;
-}
-
-static int is_psrtransop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "MSR") == 0 || strcmp(u, "MRS") == 0;
-}
-
-static int is_mulop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "MUL") == 0 || strcmp(u, "MLA") == 0 ||
-         strcmp(u, "MULS") == 0 || strcmp(u, "MLAS") == 0;
-}
-
-static int is_longmulop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  const char *list[] = {"UMULL",  "SMULL",  "UMLAL",  "SMLAL", "UMULLS",
-                        "SMULLS", "UMLALS", "SMLALS", NULL};
-
-  int i;
-  for (i = 0; list[i]; i++)
-    if (strcmp(u, list[i]) == 0)
-      return 1;
-
-  return 0;
-}
-
-static int is_swiop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "SWI") == 0 || strcmp(u, "SVC") == 0;
-}
-
-static int is_singledatatransop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  const char *list[] = {"LDR",  "STR",   "LDRB",  "STRB", "LDRT",
-                        "STRT", "LDRBT", "STRBT", NULL};
-
-  int i;
-  for (i = 0; list[i]; i++)
-    if (strcmp(u, list[i]) == 0)
-      return 1;
-
-  return 0;
-}
-
-static int is_halfsigneddatatransop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "LDRH") == 0 || strcmp(u, "LDRSH") == 0 ||
-         strcmp(u, "LDRSB") == 0 || strcmp(u, "STRH") == 0;
-}
-
-static int is_swapop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "SWP") == 0 || strcmp(u, "SWPB") == 0;
-}
-
-static int is_blockdatatransop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  const char *list[] = {"LDMFD", "LDMED", "LDMFA", "LDMEA", "LDMIA", "LDMIB",
-                        "LDMDA", "LDMDB", "STMFD", "STMED", "STMFA", "STMEA",
-                        "STMIA", "STMIB", "STMDA", "STMDB", NULL};
-
-  int i;
-  for (i = 0; list[i]; i++)
-    if (strcmp(u, list[i]) == 0)
-      return 1;
-
-  return 0;
-}
-
-static int is_coprocregtransop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "MRC") == 0 || strcmp(u, "MCR") == 0;
-}
-
-static int is_pseudoinstructionop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "ADR") == 0;
-}
-
-static int is_miscarithmeticop(const char *s) {
-  char u[8];
-
-  strupper(s, u, sizeof(u));
-
-  return strcmp(u, "CLZ") == 0;
-}
-
-static int is_otherkeyword(const char *s) {
-  char u[16];
-
-  strupper(s, u, sizeof(u));
-
-  const char *list[] = {
-      "LSL",      "LSR",      "ASL", "ASR",  "ROR",  "RRX",      "P0",
-      "P1",       "P2",       "P3",  "P4",   "P5",   "P6",       "P7",
-      "P8",       "P9",       "P10", "P11",  "P12",  "P13",      "P14",
-      "P15",      "C0",       "C1",  "C2",   "C3",   "C4",       "C5",
-      "C6",       "C7",       "C8",  "C9",   "C10",  "C11",      "C12",
-      "C13",      "C14",      "C15", "CPSR", "SPSR", "CPSR_ALL", "SPSR_ALL",
-      "SPSR_FLG", "CPSR_FLG", NULL};
-
-  int i;
-  for (i = 0; list[i]; i++)
-    if (strcmp(u, list[i]) == 0)
-      return 1;
-
-  return 0;
-}
-
-static int is_opname(const char *s) {
-  return is_preasm_directive(s) || is_directive(s) || is_dataprocop(s) ||
-         is_branchop(s) || is_psrtransop(s) || is_mulop(s) || is_longmulop(s) ||
-         is_swiop(s) || is_singledatatransop(s) ||
-         is_halfsigneddatatransop(s) || is_swapop(s) ||
-         is_blockdatatransop(s) || is_coprocregtransop(s) ||
-         is_pseudoinstructionop(s) || is_miscarithmeticop(s);
-}
-
-static int is_conditionable(const char *s) {
-  return !(is_preasm_directive(s) || is_directive(s)) && is_opname(s);
-}
-
-static int is_pseudoinstruction(const char *opname) {
-  return is_pseudoinstructionop(opname);
-}
-
-static int is_valid_label(const char *s) {
-  if (!s || !*s)
-    return 0;
-
-  if (!isalpha((unsigned char)s[0]))
-    return 0;
-
-  while (*s) {
-    if (!my_isalnum(*s) && *s != '_')
-      return 0;
-
-    s++;
-  }
-
-  return 1;
-}
-
-static int is_private_label(const char *s) {
-  return is_directive(s) || is_opname(s) || is_reg(s) || is_otherkeyword(s);
 }
 
 static int is_expressable_imval(const char *s) {
@@ -1125,137 +449,6 @@ static int int_to_signrotimv(long long n, int *sign, int *rot,
   }
 
   return 0;
-}
-
-/* Split s by comma into parts. Returns array of strdup'd strings, *n = count.
- * Caller frees. */
-static char **split_by_comma(const char *s, int *n) {
-  char **parts = NULL;
-  *n = 0;
-
-  if (!s || !*s)
-    return NULL;
-
-  const char *start = s;
-
-  while (1) {
-    const char *comma = strchr(start, ',');
-    char buf[4096];
-
-    size_t len = comma ? (size_t)(comma - start) : strlen(start);
-    if (len >= sizeof(buf))
-      len = sizeof(buf) - 1;
-
-    memcpy(buf, start, len);
-    buf[len] = '\0';
-
-    char *trimmed = strtrim(buf);
-
-    parts = realloc(parts, (*n + 1) * sizeof(char *));
-    parts[(*n)++] = strdup_s(trimmed);
-
-    if (!comma)
-      break;
-
-    start = comma + 1;
-  }
-
-  return parts;
-}
-
-/* Split s by comma, max_n parts. Returns number of parts. Fills parts array
- * with strdup'd strings. */
-static int split_by_comma_n(const char *s, char **parts, int max_n) {
-  int n;
-  char **tmp = split_by_comma(s, &n);
-  int i;
-
-  if (n > max_n)
-    n = max_n;
-
-  for (i = 0; i < n; i++)
-    parts[i] = tmp[i];
-
-  /* free extras */
-  int total;
-  char **tmp2 = split_by_comma(s, &total);
-
-  for (i = n; i < total; i++)
-    free(tmp2[i]);
-
-  free(tmp2);
-  free(tmp);
-
-  return n;
-}
-
-static void free_parts(char **parts, int n) {
-  int i;
-  for (i = 0; i < n; i++)
-    free(parts[i]);
-}
-
-/* Split by comma with limit (like Python split(',', maxsplit)) */
-static int split_by_comma_maxsplit(const char *s, int maxsplit, char **parts,
-                                   int max_parts) {
-  int n = 0;
-  const char *start = s;
-
-  while (n < max_parts) {
-    const char *comma = (n < maxsplit) ? strchr(start, ',') : NULL;
-    char buf[4096];
-
-    size_t len = comma ? (size_t)(comma - start) : strlen(start);
-    if (len >= sizeof(buf))
-      len = sizeof(buf) - 1;
-
-    memcpy(buf, start, len);
-    buf[len] = '\0';
-
-    char *trimmed = strdup_s(strtrim(buf));
-    parts[n++] = trimmed;
-
-    if (!comma)
-      break;
-
-    start = comma + 1;
-  }
-
-  return n;
-}
-
-/* Split by whitespace (any amount), at most 2 parts */
-static int split_whitespace(const char *s, char *left, size_t maxleft,
-                            char *right, size_t maxright) {
-  const char *p = s;
-  while (*p && isspace((unsigned char)*p))
-    p++;
-
-  if (!*p) {
-    left[0] = '\0';
-    right[0] = '\0';
-
-    return 0;
-  }
-
-  const char *start = p;
-  while (*p && !isspace((unsigned char)*p))
-    p++;
-
-  size_t llen = p - start;
-  if (llen >= maxleft)
-    llen = maxleft - 1;
-
-  memcpy(left, start, llen);
-  left[llen] = '\0';
-
-  while (*p && isspace((unsigned char)*p))
-    p++;
-
-  strncpy(right, p, maxright - 1);
-  right[maxright - 1] = '\0';
-
-  return *right ? 2 : 1;
 }
 
 /* Label dictionary */
@@ -1468,6 +661,151 @@ static long long pcrelative_expression_to_int(const char *s,
   return offset + _aropexpr_to_int(rtrimmed);
 }
 
+/* Evaluate a label expression: a defined label (address label or EQU
+ * constant) optionally followed by +/- arithmetic, e.g. "buffer",
+ * "buffer+4". Plain numeric literals are not accepted here: that split
+ * keeps this evaluator from recursing into is_valid_imval, which calls
+ * back into it for named constants. Returns 1 on success. */
+static int eval_label_expression(const char *s, long long *out) {
+  char tmp[256];
+
+  strncpy(tmp, s, sizeof(tmp) - 1);
+  tmp[sizeof(tmp) - 1] = '\0';
+
+  char *t = strtrim(tmp);
+
+  if (!isalpha((unsigned char)t[0]) && t[0] != '_')
+    return 0;
+
+  int i;
+  for (i = 0; t[i]; i++)
+    if (!my_isalnum(t[i]) && t[i] != '_')
+      break;
+
+  char label[128];
+
+  strncpy(label, t, i < 128 ? i : 127);
+  label[i < 128 ? i : 127] = '\0';
+
+  long long laddr;
+  if (!label_lookup(label, &laddr))
+    return 0;
+
+  char *rest = strtrim(t + i);
+  if (!*rest) {
+    *out = laddr;
+
+    return 1;
+  }
+
+  char err[80];
+
+  err[0] = '\0';
+
+  _check_aropexpr(rest, err, sizeof(err));
+  if (err[0])
+    return 0;
+
+  *out = laddr + _aropexpr_to_int(rest);
+
+  return 1;
+}
+
+/* Evaluate an absolute expression: a numeric literal or a label
+ * expression. Returns 1 on success. */
+static int eval_abs_expression(const char *s, long long *out) {
+  char tmp[256];
+
+  strncpy(tmp, s, sizeof(tmp) - 1);
+  tmp[sizeof(tmp) - 1] = '\0';
+
+  char *t = strtrim(tmp);
+
+  if (is_valid_numeric_literal(t)) {
+    *out = numeric_literal_to_int(t);
+
+    return 1;
+  }
+
+  return eval_label_expression(t, out);
+}
+
+/* Literal pools for the LDR rX,=expr pseudo-instruction.
+ *
+ * Stage 2 collects the pending literals (deduplicated by expression
+ * text) and places them at each LTORG directive; an automatic pool is
+ * appended at the end of the program. Each literal gets a reserved
+ * label __litN so the regular PC-relative LDR machinery handles reach
+ * checking and encoding. */
+#define MAX_LITERALS 512
+#define MAX_LITPOOLS 64
+
+typedef struct {
+  char expr[128];
+  long long addr;
+} Literal;
+
+typedef struct {
+  long long addr; /* address of the LTORG directive */
+  int first, count;
+  int pad;
+} LitPool;
+
+static Literal g_literals[MAX_LITERALS];
+static int g_num_literals = 0;
+static int g_pending_start = 0; /* first literal not yet placed in a pool */
+static LitPool g_pools[MAX_LITPOOLS];
+static int g_num_pools = 0;
+
+static void literals_reset(void) {
+  g_num_literals = 0;
+  g_pending_start = 0;
+  g_num_pools = 0;
+}
+
+/* Place all pending literals at an LTORG located at `address`.
+ * Returns the directive's size in bytes, or -1 on overflow. */
+static int litpool_place(long long address) {
+  int count = g_num_literals - g_pending_start;
+
+  if (count == 0)
+    return 0;
+
+  if (g_num_pools >= MAX_LITPOOLS)
+    return -1;
+
+  int pad = (int)((4 - (address % 4)) % 4);
+
+  int k;
+  for (k = 0; k < count; k++) {
+    char lname[16];
+
+    g_literals[g_pending_start + k].addr = address + pad + 4 * k;
+
+    snprintf(lname, sizeof(lname), "__lit%d", g_pending_start + k);
+    label_insert(lname, g_literals[g_pending_start + k].addr);
+  }
+
+  g_pools[g_num_pools].addr = address;
+  g_pools[g_num_pools].first = g_pending_start;
+  g_pools[g_num_pools].count = count;
+  g_pools[g_num_pools].pad = pad;
+  g_num_pools++;
+
+  g_pending_start = g_num_literals;
+
+  return pad + 4 * count;
+}
+
+static const LitPool *litpool_at(long long address) {
+  int p;
+  for (p = 0; p < g_num_pools; p++)
+    if (g_pools[p].addr == address)
+      return &g_pools[p];
+
+  return NULL;
+}
+
 static int get_directive_size(const char *name, const char *operands,
                               long long address) {
   char u[16];
@@ -1510,12 +848,19 @@ static int get_directive_size(const char *name, const char *operands,
     long long alignment = 4, offset = 0;
 
     if (n >= 1 && parts[0][0])
-      alignment = numeric_literal_to_int(parts[0]);
+      alignment = is_valid_numeric_literal(parts[0])
+                      ? numeric_literal_to_int(parts[0])
+                      : -1;
     if (n >= 2)
       offset = numeric_literal_to_int(parts[1]);
 
     free_parts(parts, n);
     free(parts);
+
+    /* Sizes are computed before operand validation runs; a bad alignment
+     * must not reach the modulo below (division by zero). */
+    if (alignment <= 0)
+      return -1;
 
     return (int)((alignment - ((address + alignment - offset) % alignment)) %
                  alignment);
@@ -1546,6 +891,12 @@ static int get_directive_size(const char *name, const char *operands,
 
     return (int)sz;
   }
+
+  if (strcmp(u, "LTORG") == 0)
+    return litpool_place(address);
+
+  if (strcmp(u, "EQU") == 0)
+    return 0;
 
   return -1;
 }
@@ -2327,8 +1678,9 @@ static void check_swiop(const char *name, const char *operands, char *errbuf,
     return;
   }
 
+  /* accept both "#imm" (nAssembler style) and bare "imm" (ARM style) */
   char *op = strtrim(parts[0]);
-  if (!is_valid_imval(op)) {
+  if (!(op[0] == '#' ? is_valid_imval(op) : is_valid_numeric_literal(op))) {
     strncpy(errbuf, "Invalid operand: expected immediate value", errmax);
 
     free_parts(parts, n);
@@ -2337,7 +1689,8 @@ static void check_swiop(const char *name, const char *operands, char *errbuf,
     return;
   }
 
-  long long com = imval_to_int(op);
+  long long com =
+      (op[0] == '#') ? imval_to_int(op) : numeric_literal_to_int(op);
   if (com > (1 << 24) - 1)
     strncpy(errbuf, "Operand greater than 2^24-1", errmax);
   else if (com < -(1 << 23))
@@ -2358,7 +1711,8 @@ static void encode_swiop(const char *name, const char *condcode,
 
   char *op = strtrim(ops);
   int ccval = get_condcode_value(condcode);
-  long long com = imval_to_int(op);
+  long long com =
+      (op[0] == '#') ? imval_to_int(op) : numeric_literal_to_int(op);
   unsigned char buf[4];
   int offs[] = {28, 24, 0};
   int lens[] = {4, 4, 24};
@@ -3206,6 +2560,13 @@ parse_datatrans(const char *name, const char *operands_in, long long address) {
   /* split by comma, but only the first */
   char *parts[8];
   int n = split_by_comma_maxsplit(ops, 1, parts, 2);
+  if (n < 2) {
+    /* unreachable: the syntax check guarantees two parts */
+    if (n == 1)
+      free(parts[0]);
+
+    return r;
+  }
   /* parts[0] is rd, parts[1] is address part without closing ] */
   r.rd = get_reg_num(parts[0]);
   /* strip leading [ from parts[1] */
@@ -3230,7 +2591,12 @@ parse_datatrans(const char *name, const char *operands_in, long long address) {
   char *subparts[4];
   int sn = split_by_comma_maxsplit(ap, 3, subparts, 4);
 
-  r.rn = get_reg_num(subparts[0]);
+  /* post-indexed: the closing ] sits right after the base register */
+  size_t s0l = strlen(subparts[0]);
+  if (s0l > 0 && subparts[0][s0l - 1] == ']')
+    subparts[0][s0l - 1] = '\0';
+
+  r.rn = get_reg_num(strtrim(subparts[0]));
   r.offset = 0;
   r.upflag = 1;
   r.iflag = 0;
@@ -3263,9 +2629,9 @@ parse_datatrans(const char *name, const char *operands_in, long long address) {
       int rm = get_reg_num(ostr);
       int shiftfield = 0;
 
-      if (sn == 4) {
+      if (sn >= 3) {
         /* shift */
-        char *shiftstr = subparts[3];
+        char *shiftstr = subparts[2];
         char sw[2][256];
         int swn = 0;
 
@@ -3892,16 +3258,38 @@ static void check_pseudoinstruction(const char *name, const char *operands,
 
     free(parts[0]);
     free(parts[1]);
+  } else if (strcmp(u, "PUSH") == 0 || strcmp(u, "POP") == 0) {
+    char ops[1024];
+
+    strncpy(ops, operands, sizeof(ops) - 1);
+    ops[sizeof(ops) - 1] = '\0';
+
+    char *op = strtrim(ops);
+    size_t ol = strlen(op);
+
+    if (ol < 3 || op[0] != '{' || op[ol - 1] != '}')
+      strncpy(errbuf, "Expected register list in {}", errmax);
+  } else if (strcmp(u, "NOP") == 0) {
+    char ops[1024];
+
+    strncpy(ops, operands, sizeof(ops) - 1);
+    ops[sizeof(ops) - 1] = '\0';
+
+    if (strtrim(ops)[0])
+      strncpy(errbuf, "NOP takes no operands", errmax);
   } else
     strncpy(errbuf, "Unknown pseudoinstruction (bug)", errmax);
 }
 
 static void get_replacement(const char *name, const char *operands,
                             long long address, char *newop, size_t newopmax,
+                            char *newflags, size_t newflagsmax,
                             char *newoperands, size_t newopmax2) {
   char u[8];
 
   strupper(name, u, sizeof(u));
+
+  newflags[0] = '\0';
 
   if (strcmp(u, "ADR") == 0) {
     char *parts[2];
@@ -3911,8 +3299,8 @@ static void get_replacement(const char *name, const char *operands,
     char *reg = strtrim(parts[0]);
     char *expr = strtrim(parts[1]);
     long long offs = pcrelative_expression_to_int(expr, address);
-    int sign, rot;
-    unsigned int imv;
+    int sign = 1, rot = 0;
+    unsigned int imv = 0;
 
     int_to_signrotimv(offs, &sign, &rot, &imv);
 
@@ -3925,17 +3313,98 @@ static void get_replacement(const char *name, const char *operands,
 
     free(parts[0]);
     free(parts[1]);
+  } else if (strcmp(u, "PUSH") == 0 || strcmp(u, "POP") == 0) {
+    int is_push = (u[0] == 'P' && u[1] == 'U');
+
+    /* single plain register: use the STR/LDR encoding, as the ARM ARM
+     * prefers (and as GNU as emits) */
+    char inner[64];
+
+    strncpy(inner, operands, sizeof(inner) - 1);
+    inner[sizeof(inner) - 1] = '\0';
+
+    char *t = strtrim(inner);
+    size_t tl = strlen(t);
+    int single = 0;
+
+    if (tl >= 3 && t[0] == '{' && t[tl - 1] == '}') {
+      t[tl - 1] = '\0';
+      t = strtrim(t + 1);
+
+      single = !strchr(t, ',') && !strchr(t, '-') && is_reg(t);
+    }
+
+    if (single) {
+      strncpy(newop, is_push ? "STR" : "LDR", newopmax - 1);
+      newop[newopmax - 1] = '\0';
+
+      if (is_push)
+        snprintf(newoperands, newopmax2, "%s,[SP,#-4]!", t);
+      else
+        snprintf(newoperands, newopmax2, "%s,[SP],#4", t);
+    } else {
+      /* PUSH {list} -> STMFD SP!,{list} ; POP {list} -> LDMFD SP!,{list} */
+      strncpy(newop, is_push ? "STM" : "LDM", newopmax - 1);
+      newop[newopmax - 1] = '\0';
+
+      strncpy(newflags, "FD", newflagsmax - 1);
+      newflags[newflagsmax - 1] = '\0';
+
+      snprintf(newoperands, newopmax2, "SP!,%s", operands);
+    }
+  } else if (strcmp(u, "NOP") == 0) {
+    /* NOP -> MOV R0,R0 */
+    strncpy(newop, "MOV", newopmax - 1);
+    newop[newopmax - 1] = '\0';
+
+    strncpy(newoperands, "R0,R0", newopmax2 - 1);
+    newoperands[newopmax2 - 1] = '\0';
   }
 }
 
 /* directive check/encode */
 static void check_directive(const char *name, const char *operands,
-                            char *errbuf, size_t errmax) {
+                            long long address, char *errbuf, size_t errmax) {
   errbuf[0] = '\0';
 
   char u[16];
 
   strupper(name, u, sizeof(u));
+
+  if (strcmp(u, "EQU") == 0) {
+    /* the value itself is validated in the label-building stage */
+    if (!operands[0])
+      strncpy(errbuf, "Missing EQU value", errmax);
+
+    return;
+  }
+
+  if (strcmp(u, "LTORG") == 0) {
+    if (operands[0]) {
+      strncpy(errbuf, "LTORG takes no operands", errmax);
+
+      return;
+    }
+
+    /* validate the literal expressions placed in this pool */
+    const LitPool *pool = litpool_at(address);
+
+    if (pool) {
+      int k;
+      for (k = 0; k < pool->count; k++) {
+        const char *e = g_literals[pool->first + k].expr;
+        long long v;
+
+        if (!eval_abs_expression(e, &v)) {
+          snprintf(errbuf, errmax, "Invalid literal expression \"=%.80s\"", e);
+
+          return;
+        }
+      }
+    }
+
+    return;
+  }
 
   if (strcmp(u, "DCD") == 0 || strcmp(u, "DCDU") == 0) {
     int n;
@@ -4033,7 +3502,7 @@ static void check_directive(const char *name, const char *operands,
 
       if (v < -32768) {
         strncpy(errbuf,
-                "Numeric literal outside of 32bit range: lower than -2^15",
+                "Numeric literal outside of 16bit range: lower than -2^15",
                 errmax);
 
         free_parts(parts, n);
@@ -4190,7 +3659,7 @@ static void check_directive(const char *name, const char *operands,
 
     const unsigned char *d = filecontents(operands, &sz);
     if (!d)
-      snprintf(errbuf, errmax, "Could not open file \"%s\"", operands);
+      snprintf(errbuf, errmax, "Could not open file \"%.400s\"", operands);
 
     return;
   }
@@ -4322,98 +3791,119 @@ static void encode_directive(const char *name, const char *operands,
 
     return;
   }
+
+  if (strcmp(u, "LTORG") == 0) {
+    const LitPool *pool = litpool_at(address);
+
+    if (!pool)
+      return;
+
+    bb_append_zeros(out, pool->pad);
+
+    int k;
+    for (k = 0; k < pool->count; k++) {
+      long long v = 0;
+
+      eval_abs_expression(g_literals[pool->first + k].expr, &v);
+
+      unsigned char b[4];
+
+      b[0] = v & 0xFF;
+      b[1] = (v >> 8) & 0xFF;
+      b[2] = (v >> 16) & 0xFF;
+      b[3] = (v >> 24) & 0xFF;
+
+      bb_append(out, b, 4);
+    }
+
+    return;
+  }
 }
 
+/* The long, per-line strings are heap-allocated: with fixed 4 KB buffers a
+ * Sourceline weighed ~17 KB, which OOMed the calculator on large sources. */
 typedef struct {
-  char line[4096];
-  char notcomment[4096];
+  char *line;       /* original source text */
+  char *notcomment; /* line with the ;-comment stripped */
+  char *operation;  /* opcode + operands (label removed) */
+  char *operands;   /* operand string */
   char label[256];
-  char operation[4096];
   char opname[64];
   char flags[8];
   char condcode[4];
-  char operands[4096];
   long long address;
   ByteBuf hexcode;
   int length;
   char errmsg[512];
+  char *srcfile; /* strdup'd path of the file this line came from */
+  int srcline;   /* 1-based line number within srcfile */
 } Sourceline;
 
-static void sl_init(Sourceline *sl, const char *line) {
-  strncpy(sl->line, line, sizeof(sl->line) - 1);
+/* Replace *dst with a copy of src (src may alias *dst or point into it). */
+static void set_str(char **dst, const char *src) {
+  char *d = strdup_s(src ? src : "");
 
-  sl->line[sizeof(sl->line) - 1] = '\0';
-  sl->notcomment[0] = '\0';
+  free(*dst);
+  *dst = d;
+}
+
+static void sl_init(Sourceline *sl, const char *line) {
+  sl->line = strdup_s(line);
+  sl->notcomment = strdup_s("");
+  sl->operation = strdup_s("");
+  sl->operands = strdup_s("");
   sl->label[0] = '\0';
-  sl->operation[0] = '\0';
   sl->opname[0] = '\0';
   sl->flags[0] = '\0';
   sl->condcode[0] = '\0';
-  sl->operands[0] = '\0';
   sl->address = -1;
 
   bb_init(&sl->hexcode);
 
   sl->length = -1;
   sl->errmsg[0] = '\0';
+  sl->srcfile = NULL;
+  sl->srcline = 0;
+}
+
+static void sl_free(Sourceline *sl) {
+  free(sl->line);
+  free(sl->notcomment);
+  free(sl->operation);
+  free(sl->operands);
+  free(sl->srcfile);
+
+  bb_free(&sl->hexcode);
 }
 
 static int sl_parse_comments(Sourceline *sl) {
-  int sci = -1, dqi = -1;
+  /* find the first ';' that is not inside a "..." string or a 'c' literal */
+  int sci = -1;
+  int inquote = 0;
 
-  const char *p;
-  for (p = sl->line; *p; p++) {
-    if (*p == ';' && sci < 0)
-      sci = (int)(p - sl->line);
-    if (*p == '"' && dqi < 0)
-      dqi = (int)(p - sl->line);
-  }
+  int i;
+  for (i = 0; sl->line[i]; i++) {
+    if (sl->line[i] == '"')
+      inquote = !inquote;
 
-  if (sci < 0 || (dqi >= 0 && dqi < sci)) {
-    /* no semicolon, or semicolon is after a quote */
-    if (sci >= 0) {
-      /* check if ; is inside a string */
-      char tmpline[4096];
-      strncpy(tmpline, sl->line, sizeof(tmpline) - 1);
-      tmpline[sizeof(tmpline) - 1] = '\0';
+    if (!inquote && sl->line[i] == '\'' && sl->line[i + 1] &&
+        sl->line[i + 2] == '\'') {
+      i += 2;
 
-      /* replace \" with "" */
-      char *bs;
-      while ((bs = strstr(tmpline, "\\\"")) != NULL) {
-        bs[0] = bs[1] = '"';
-      }
+      continue;
+    }
 
-      /* recalculate sci */
-      sci = -1;
+    if (sl->line[i] == ';' && !inquote) {
+      sci = i;
 
-      int inquote = 0;
-
-      int i;
-      for (i = 0; sl->line[i]; i++) {
-        if (sl->line[i] == '"')
-          inquote = !inquote;
-        if (sl->line[i] == ';' && !inquote) {
-          sci = i;
-
-          break;
-        }
-      }
+      break;
     }
   }
 
-  if (sci < 0)
-    strncpy(sl->notcomment, sl->line, sizeof(sl->notcomment) - 1);
-  else {
-    strncpy(sl->notcomment, sl->line,
-            sci < (int)sizeof(sl->notcomment) - 1
-                ? sci
-                : (int)sizeof(sl->notcomment) - 1);
-    sl->notcomment[sci < (int)sizeof(sl->notcomment) - 1
-                       ? sci
-                       : (int)sizeof(sl->notcomment) - 1] = '\0';
-  }
+  set_str(&sl->notcomment, sl->line);
 
-  sl->notcomment[sizeof(sl->notcomment) - 1] = '\0';
+  if (sci >= 0)
+    sl->notcomment[sci] = '\0';
 
   /* rstrip */
   size_t l = strlen(sl->notcomment);
@@ -4426,10 +3916,12 @@ static int sl_parse_comments(Sourceline *sl) {
 
 static int sl_parse_labelpart(Sourceline *sl) {
   if (!sl->notcomment[0] || isspace((unsigned char)sl->notcomment[0])) {
-    char *t = strtrim(sl->notcomment);
+    char tmp[4096];
 
-    strncpy(sl->operation, t, sizeof(sl->operation) - 1);
-    sl->operation[sizeof(sl->operation) - 1] = '\0';
+    strncpy(tmp, sl->notcomment, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+
+    set_str(&sl->operation, strtrim(tmp));
 
     return 0;
   }
@@ -4444,12 +3936,8 @@ static int sl_parse_labelpart(Sourceline *sl) {
   strncpy(sl->label, left, sizeof(sl->label) - 1);
   sl->label[sizeof(sl->label) - 1] = '\0';
 
-  if (n == 2) {
-    char *t = strtrim(right);
-
-    strncpy(sl->operation, t, sizeof(sl->operation) - 1);
-    sl->operation[sizeof(sl->operation) - 1] = '\0';
-  }
+  if (n == 2)
+    set_str(&sl->operation, strtrim(right));
 
   if (!is_valid_label(sl->label)) {
     snprintf(sl->errmsg, sizeof(sl->errmsg),
@@ -4510,44 +3998,46 @@ static void sl_parse_tbhs_suffixes(Sourceline *sl) {
 
   int i;
   for (i = 0; tbhsoplist[i]; i++) {
-    if (startswith(sl->opname, tbhsoplist[i])) {
-      if (sl->opname[strlen(sl->opname) - 1] == 'T') {
-        sl->opname[strlen(sl->opname) - 1] = '\0';
-        char tmp[8];
+    if (!startswith(sl->opname, tbhsoplist[i]))
+      continue;
 
-        snprintf(tmp, sizeof(tmp), "T%s", sl->flags);
-        strncpy(sl->flags, tmp, sizeof(sl->flags) - 1);
-      }
+    size_t oplen = strlen(tbhsoplist[i]);
+    const char *tail = sl->opname + oplen;
 
-      if (sl->opname[strlen(sl->opname) - 1] == 'B') {
-        sl->opname[strlen(sl->opname) - 1] = '\0';
+    if (!tail[0])
+      return;
 
-        char tmp[8];
+    /* NAME = prefix + suffix (e.g. LDRSB) */
+    if (is_tbhs_suffix(tail)) {
+      strncpy(sl->flags, tail, sizeof(sl->flags) - 1);
+      sl->flags[sizeof(sl->flags) - 1] = '\0';
+      sl->opname[oplen] = '\0';
 
-        snprintf(tmp, sizeof(tmp), "B%s", sl->flags);
-        strncpy(sl->flags, tmp, sizeof(sl->flags) - 1);
-      }
-
-      if (sl->opname[strlen(sl->opname) - 1] == 'H') {
-        sl->opname[strlen(sl->opname) - 1] = '\0';
-
-        char tmp[8];
-
-        snprintf(tmp, sizeof(tmp), "H%s", sl->flags);
-        strncpy(sl->flags, tmp, sizeof(sl->flags) - 1);
-      }
-
-      if (sl->opname[strlen(sl->opname) - 1] == 'S') {
-        sl->opname[strlen(sl->opname) - 1] = '\0';
-
-        char tmp[8];
-
-        snprintf(tmp, sizeof(tmp), "S%s", sl->flags);
-        strncpy(sl->flags, tmp, sizeof(sl->flags) - 1);
-      }
-
-      break;
+      return;
     }
+
+    /* NAME = prefix + condcode + suffix (e.g. LDRVSB = LDR VS B).
+     * Keep the condcode in the opname; sl_parse_condition_code strips
+     * it afterwards. */
+    if (strlen(tail) >= 2) {
+      char cc[3];
+
+      cc[0] = tail[0];
+      cc[1] = tail[1];
+      cc[2] = '\0';
+
+      if (is_condcode(cc)) {
+        const char *rest = tail + 2;
+
+        if (rest[0] && is_tbhs_suffix(rest)) {
+          strncpy(sl->flags, rest, sizeof(sl->flags) - 1);
+          sl->flags[sizeof(sl->flags) - 1] = '\0';
+          sl->opname[oplen + 2] = '\0';
+        }
+      }
+    }
+
+    return;
   }
 }
 
@@ -4617,6 +4107,13 @@ static void sl_parse_condition_code(Sourceline *sl) {
   if (onlen >= 2 && is_condcode(sl->opname + onlen - 2)) {
     strncpy(sl->condcode, sl->opname + onlen - 2, sizeof(sl->condcode) - 1);
     sl->opname[onlen - 2] = '\0';
+
+    /* The suffix parsers ran before the condition code was stripped; with
+     * UAL-style ordering (LDRBEQ, LDMFDEQ, SUBSEQ, ...) the size/mode
+     * suffixes sit before the condition code, so strip them again now. */
+    sl_parse_s_suffix(sl);
+    sl_parse_tbhs_suffixes(sl);
+    sl_parse_addrmode_suffixes(sl);
   }
 }
 
@@ -4662,17 +4159,47 @@ static int sl_parse_namepart(Sourceline *sl) {
 
   strupper(left, sl->opname, sizeof(sl->opname));
 
-  if (n == 2) {
-    char *t = strtrim(right);
+  if (n == 2)
+    set_str(&sl->operands, strtrim(right));
 
-    strncpy(sl->operands, t, sizeof(sl->operands) - 1);
-    sl->operands[sizeof(sl->operands) - 1] = '\0';
-  }
+  char opname_orig[64];
+
+  strncpy(opname_orig, sl->opname, sizeof(opname_orig) - 1);
+  opname_orig[sizeof(opname_orig) - 1] = '\0';
 
   sl_parse_s_suffix(sl);
   sl_parse_tbhs_suffixes(sl);
   sl_parse_addrmode_suffixes(sl);
   sl_parse_condition_code(sl);
+
+  {
+    char fn[128];
+
+    snprintf(fn, sizeof(fn), "%s%s", sl->opname, sl->flags);
+
+    if (sl->opname[0] && !is_opname(fn)) {
+      /* Retry with the condition code stripped first: in names like
+       * LDRHS or LDRGT the condition code's last letter looks like a
+       * size suffix and misleads the suffix parsers. */
+      strncpy(sl->opname, opname_orig, sizeof(sl->opname) - 1);
+      sl->opname[sizeof(sl->opname) - 1] = '\0';
+      sl->flags[0] = '\0';
+      sl->condcode[0] = '\0';
+
+      size_t onlen = strlen(sl->opname);
+
+      if (onlen > 2 && is_condcode(sl->opname + onlen - 2)) {
+        strncpy(sl->condcode, sl->opname + onlen - 2,
+                sizeof(sl->condcode) - 1);
+        sl->condcode[sizeof(sl->condcode) - 1] = '\0';
+        sl->opname[onlen - 2] = '\0';
+
+        sl_parse_s_suffix(sl);
+        sl_parse_tbhs_suffixes(sl);
+        sl_parse_addrmode_suffixes(sl);
+      }
+    }
+  }
 
   if (!sl->condcode[0]) {
     char fn[128];
@@ -4694,8 +4221,135 @@ static int sl_is_incbin(Sourceline *sl) {
   return strcmp(sl->opname, "INCBIN") == 0;
 }
 
+/* Handle LDR rX,=expr at size-calculation time. Returns 0 if the line is
+ * not of that form, 1 if it was rewritten, -1 on error (errmsg set). */
+static int sl_handle_ldr_literal(Sourceline *sl) {
+  if (strcmp(sl->opname, "LDR") != 0 || sl->flags[0])
+    return 0;
+
+  if (!strchr(sl->operands, '='))
+    return 0;
+
+  char *parts[2];
+
+  int n = split_by_comma_maxsplit(sl->operands, 1, parts, 2);
+  if (n < 2) {
+    if (n == 1)
+      free(parts[0]);
+
+    return 0;
+  }
+
+  char *rd = strtrim(parts[0]);
+  char *rhs = strtrim(parts[1]);
+
+  if (rhs[0] != '=') {
+    free(parts[0]);
+    free(parts[1]);
+
+    return 0;
+  }
+
+  char expr[128];
+
+  strncpy(expr, rhs + 1, sizeof(expr) - 1);
+  expr[sizeof(expr) - 1] = '\0';
+
+  char *e = strtrim(expr);
+
+  int ret = -1;
+
+  if (!is_reg(rd)) {
+    strncpy(sl->errmsg, "Invalid operand: expected register",
+            sizeof(sl->errmsg) - 1);
+    sl->errmsg[sizeof(sl->errmsg) - 1] = '\0';
+  } else if (!e[0]) {
+    strncpy(sl->errmsg, "Missing literal expression after '='",
+            sizeof(sl->errmsg) - 1);
+    sl->errmsg[sizeof(sl->errmsg) - 1] = '\0';
+  } else if (strlen(rhs + 1) >= sizeof(expr) - 1) {
+    strncpy(sl->errmsg, "Literal expression too long",
+            sizeof(sl->errmsg) - 1);
+    sl->errmsg[sizeof(sl->errmsg) - 1] = '\0';
+  } else {
+    char newops[192];
+    int rewritten = 0;
+
+    if (is_valid_numeric_literal(e)) {
+      /* value known now: use MOV/MVN when the constant is encodable */
+      unsigned int v =
+          (unsigned int)(numeric_literal_to_int(e) & 0xFFFFFFFFu);
+
+      int i;
+      for (i = 0; i < 32 && !rewritten; i += 2) {
+        if (rotateleft32(v, i) < 256) {
+          strncpy(sl->opname, "MOV", sizeof(sl->opname) - 1);
+          snprintf(newops, sizeof(newops), "%s,#%u", rd, v);
+
+          rewritten = 1;
+        }
+      }
+
+      for (i = 0; i < 32 && !rewritten; i += 2) {
+        if (rotateleft32(~v, i) < 256) {
+          strncpy(sl->opname, "MVN", sizeof(sl->opname) - 1);
+          snprintf(newops, sizeof(newops), "%s,#%u", rd, ~v);
+
+          rewritten = 1;
+        }
+      }
+    }
+
+    if (!rewritten) {
+      /* literal-pool load: reuse a pending literal with the same text */
+      int idx = -1, k;
+
+      for (k = g_pending_start; k < g_num_literals; k++) {
+        if (strcmp(g_literals[k].expr, e) == 0) {
+          idx = k;
+
+          break;
+        }
+      }
+
+      if (idx < 0 && g_num_literals >= MAX_LITERALS) {
+        strncpy(sl->errmsg, "Too many literal-pool entries",
+                sizeof(sl->errmsg) - 1);
+        sl->errmsg[sizeof(sl->errmsg) - 1] = '\0';
+
+        free(parts[0]);
+        free(parts[1]);
+
+        return -1;
+      }
+
+      if (idx < 0) {
+        idx = g_num_literals++;
+
+        strncpy(g_literals[idx].expr, e, sizeof(g_literals[idx].expr) - 1);
+        g_literals[idx].expr[sizeof(g_literals[idx].expr) - 1] = '\0';
+        g_literals[idx].addr = -1;
+      }
+
+      snprintf(newops, sizeof(newops), "%s,__lit%d", rd, idx);
+    }
+
+    set_str(&sl->operands, newops);
+
+    ret = 1;
+  }
+
+  free(parts[0]);
+  free(parts[1]);
+
+  return ret;
+}
+
 static int sl_set_length_and_address(Sourceline *sl, long long address) {
   sl->address = address;
+
+  if (sl_handle_ldr_literal(sl) < 0)
+    return -1;
 
   char fullname[128];
 
@@ -4711,6 +4365,7 @@ static int sl_set_length_and_address(Sourceline *sl, long long address) {
   if (sl->length == -1) {
     strncpy(sl->errmsg, "Could not calculate instruction size",
             sizeof(sl->errmsg) - 1);
+    sl->errmsg[sizeof(sl->errmsg) - 1] = '\0';
 
     return -1;
   }
@@ -4731,17 +4386,20 @@ static int sl_replace_pseudoinstructions(Sourceline *sl) {
 
   if (errbuf[0]) {
     strncpy(sl->errmsg, errbuf, sizeof(sl->errmsg) - 1);
+    sl->errmsg[sizeof(sl->errmsg) - 1] = '\0';
 
     return -1;
   }
 
-  char newop[64], newoperands[4096];
+  char newop[64], newflags[8], newoperands[4096];
 
   get_replacement(sl->opname, sl->operands, sl->address, newop, sizeof(newop),
-                  newoperands, sizeof(newoperands));
+                  newflags, sizeof(newflags), newoperands,
+                  sizeof(newoperands));
 
   strncpy(sl->opname, newop, sizeof(sl->opname) - 1);
-  strncpy(sl->operands, newoperands, sizeof(sl->operands) - 1);
+  strncpy(sl->flags, newflags, sizeof(sl->flags) - 1);
+  set_str(&sl->operands, newoperands);
 
   return 0;
 }
@@ -4756,7 +4414,8 @@ static int sl_check_syntax(Sourceline *sl) {
   errbuf[0] = '\0';
 
   if (is_directive(fullname))
-    check_directive(sl->opname, sl->operands, errbuf, sizeof(errbuf));
+    check_directive(sl->opname, sl->operands, sl->address, errbuf,
+                    sizeof(errbuf));
   else if (is_dataprocop(fullname))
     check_dataprocop(sl->opname, sl->operands, errbuf, sizeof(errbuf));
   else if (is_branchop(fullname))
@@ -4790,6 +4449,7 @@ static int sl_check_syntax(Sourceline *sl) {
             sizeof(errbuf) - 1);
   if (errbuf[0]) {
     strncpy(sl->errmsg, errbuf, sizeof(sl->errmsg) - 1);
+    sl->errmsg[sizeof(sl->errmsg) - 1] = '\0';
 
     return -1;
   }
@@ -4878,7 +4538,7 @@ static void cl_push(CodeList *cl, Sourceline *sl) {
 static void cl_free(CodeList *cl) {
   int i;
   for (i = 0; i < cl->n; i++) {
-    bb_free(&cl->lines[i]->hexcode);
+    sl_free(cl->lines[i]);
     free(cl->lines[i]);
   }
 
@@ -4953,6 +4613,9 @@ static int read_file_and_stage1_parse(const char *infile,
 
     sl_init(code[i], textlines[i]);
 
+    code[i]->srcfile = strdup_s(fullpath);
+    code[i]->srcline = i + 1;
+
     free(textlines[i]);
   }
 
@@ -4973,9 +4636,9 @@ static int read_file_and_stage1_parse(const char *infile,
 
     if (sl_parse_comments(c) != 0) {
       if (c->errmsg[0])
-        printerror(fullpath, i, c->line, c->errmsg);
+        printerror(fullpath, i + 1, c->line, c->errmsg);
       else
-        printerror(fullpath, i, c->line, "unknown error in parse_comments");
+        printerror(fullpath, i + 1, c->line, "unknown error in parse_comments");
 
       numerrs++;
 
@@ -4984,9 +4647,9 @@ static int read_file_and_stage1_parse(const char *infile,
 
     if (sl_parse_labelpart(c) != 0) {
       if (c->errmsg[0])
-        printerror(fullpath, i, c->line, c->errmsg);
+        printerror(fullpath, i + 1, c->line, c->errmsg);
       else
-        printerror(fullpath, i, c->line, "unknown error in parse_labelpart");
+        printerror(fullpath, i + 1, c->line, "unknown error in parse_labelpart");
 
       numerrs++;
 
@@ -4995,9 +4658,9 @@ static int read_file_and_stage1_parse(const char *infile,
 
     if (sl_parse_namepart(c) != 0) {
       if (c->errmsg[0])
-        printerror(fullpath, i, c->line, c->errmsg);
+        printerror(fullpath, i + 1, c->line, c->errmsg);
       else
-        printerror(fullpath, i, c->line, "unknown error in parse_namepart");
+        printerror(fullpath, i + 1, c->line, "unknown error in parse_namepart");
 
       numerrs++;
 
@@ -5008,10 +4671,10 @@ static int read_file_and_stage1_parse(const char *infile,
       char absp[MAX_PATH];
       long sz = add_file(c->operands, absp, MAX_PATH);
 
-      strncpy(c->operands, absp, sizeof(c->operands) - 1);
+      set_str(&c->operands, absp);
 
       if (sz < 0) {
-        printerror(fullpath, i, c->line, "error in add_file");
+        printerror(fullpath, i + 1, c->line, "error in add_file");
 
         numerrs++;
 
@@ -5050,7 +4713,7 @@ static int read_file_and_stage1_parse(const char *infile,
 
   if (numerrs != 0) {
     for (i = 0; i < nlines; i++) {
-      bb_free(&code[i]->hexcode);
+      sl_free(code[i]);
       free(code[i]);
     }
 
@@ -5076,6 +4739,10 @@ static int read_file_and_stage1_parse(const char *infile,
 
     cl_append(out, &included[i].cl);
 
+    /* the INCLUDE line itself is replaced by the included code */
+    sl_free(code[idx]);
+    free(code[idx]);
+
     currpos = idx + 1;
   }
 
@@ -5093,6 +4760,8 @@ static int assembler(const char *infile, const char *outfile, int use_zehn) {
   set_sourcepath("");
   num_labels = 0;
 
+  literals_reset();
+
   CodeList code;
 
   cl_init(&code);
@@ -5106,6 +4775,20 @@ static int assembler(const char *infile, const char *outfile, int use_zehn) {
     return -1;
   }
 
+  /* Automatic end-of-program literal pool for pending LDR= literals */
+  {
+    Sourceline *endpool = malloc(sizeof(Sourceline));
+
+    sl_init(endpool, "; <automatic literal pool>");
+
+    strncpy(endpool->opname, "LTORG", sizeof(endpool->opname) - 1);
+    endpool->opname[sizeof(endpool->opname) - 1] = '\0';
+    endpool->srcfile = strdup_s(infile);
+    endpool->srcline = 0;
+
+    cl_push(&code, endpool);
+  }
+
   /* Stage 2: calculate length and address */
   long long curaddr = 0;
 
@@ -5115,9 +4798,9 @@ static int assembler(const char *infile, const char *outfile, int use_zehn) {
 
     if (sl_set_length_and_address(c, curaddr) != 0) {
       if (c->errmsg[0])
-        printerror(infile, i, c->line, c->errmsg);
+        printerror(c->srcfile ? c->srcfile : infile, c->srcline, c->line, c->errmsg);
       else
-        printerror(infile, i, c->line,
+        printerror(c->srcfile ? c->srcfile : infile, c->srcline, c->line,
                    "unknown error in set_length_and_address");
 
       numerrs++;
@@ -5133,19 +4816,40 @@ static int assembler(const char *infile, const char *outfile, int use_zehn) {
     return -1;
   }
 
-  /* Stage 3: build label dictionary */
+  /* Stage 3: build label dictionary (addresses and EQU constants) */
   for (i = 0; i < code.n; i++) {
     Sourceline *c = code.lines[i];
+    int is_equ = (strcmp(c->opname, "EQU") == 0);
+
+    if (is_equ && !c->label[0]) {
+      printerror(c->srcfile ? c->srcfile : infile, c->srcline, c->line,
+                 "EQU requires a label on the same line");
+
+      numerrs++;
+
+      continue;
+    }
 
     if (c->label[0]) {
       long long existing;
+      long long value = c->address;
 
       if (label_lookup(c->label, &existing)) {
-        printerror(infile, i, c->line, "Label name already used");
+        printerror(c->srcfile ? c->srcfile : infile, c->srcline, c->line,
+                   "Label name already used");
 
         numerrs++;
-      } else {
-        label_insert(c->label, c->address);
+      } else if (is_equ && !eval_abs_expression(c->operands, &value)) {
+        printerror(c->srcfile ? c->srcfile : infile, c->srcline, c->line,
+                   "Invalid EQU value (expected a numeric literal or a "
+                   "previously defined symbol)");
+
+        numerrs++;
+      } else if (label_insert(c->label, value) != 0) {
+        printerror(c->srcfile ? c->srcfile : infile, c->srcline, c->line,
+                   "Too many labels (max 4096)");
+
+        numerrs++;
       }
     }
   }
@@ -5164,9 +4868,9 @@ static int assembler(const char *infile, const char *outfile, int use_zehn) {
 
     if (sl_replace_pseudoinstructions(c) != 0) {
       if (c->errmsg[0])
-        printerror(infile, i, c->line, c->errmsg);
+        printerror(c->srcfile ? c->srcfile : infile, c->srcline, c->line, c->errmsg);
       else
-        printerror(infile, i, c->line,
+        printerror(c->srcfile ? c->srcfile : infile, c->srcline, c->line,
                    "unknown error in replace_pseudoinstructions");
 
       numerrs++;
@@ -5187,9 +4891,9 @@ static int assembler(const char *infile, const char *outfile, int use_zehn) {
 
     if (sl_assemble(c) != 0) {
       if (c->errmsg[0])
-        printerror(infile, i, c->line, c->errmsg);
+        printerror(c->srcfile ? c->srcfile : infile, c->srcline, c->line, c->errmsg);
       else
-        printerror(infile, i, c->line, "unknown error in assemble");
+        printerror(c->srcfile ? c->srcfile : infile, c->srcline, c->line, "unknown error in assemble");
 
       numerrs++;
     }
@@ -5211,12 +4915,12 @@ static int assembler(const char *infile, const char *outfile, int use_zehn) {
     return -1;
   }
 
-  if (use_zehn) {
-    uint32_t exec_size = 0;
-    for (i = 0; i < code.n; i++) {
-      exec_size += code.lines[i]->hexcode.len;
-    }
+  uint32_t exec_size = 0;
+  for (i = 0; i < code.n; i++) {
+    exec_size += code.lines[i]->hexcode.len;
+  }
 
+  if (use_zehn) {
     uint32_t flags[3];
     flags[0] = make_zehn_flag(RUNS_ON_COLOR, 1);
     flags[1] = make_zehn_flag(RUNS_ON_HWW, 1);
@@ -5251,7 +4955,7 @@ static int assembler(const char *infile, const char *outfile, int use_zehn) {
   fclose(f);
   cl_free(&code);
 
-  return 0;
+  return (int)exec_size;
 }
 
 /*
@@ -5288,14 +4992,16 @@ int main(int argc, char *argv[]) {
 
   gfx_init();
 
-  const char *infile = NULL;
+  for (;;) {
+    const char *infile = NULL;
+    char outfile[MAX_PATH];
 
-  while (1) {
-    infile = filebrowser_select();
-    if (!infile) {
-      gfx_deinit();
-      return 0;
-    }
+    while (1) {
+      infile = filebrowser_select();
+      if (!infile) {
+        gfx_deinit();
+        return 0;
+      }
 
     int is_valid_ext = 0;
     char ext_tns[64], ext_bare[64];
@@ -5325,44 +5031,60 @@ int main(int argc, char *argv[]) {
       int ans = gfx_window_confirm2("   Warning", warn_lines, 6, "Continue",
                                     "Cancel");
 
-      if (ans == 1) {
+      if (ans != 0) {
         continue;
       }
     }
 
-    break;
+    make_outpath(infile, outfile, MAX_PATH);
+
+      if (strcmp(outfile, infile) == 0) {
+        const char *err_lines[] = {"Output path would overwrite the input:",
+                                   outfile, "",
+                                   "Rename the source (e.g. name.asm.tns)."};
+
+        gfx_window_alert("NASM", err_lines, 4, "OK", 0);
+
+        continue;
+      }
+
+      break;
+    }
+
+    const char *fmt_lines[] = {
+        "Select output binary format:", "",
+        "Zehn: Native CX II support (Recommended)",
+        "PRG: Legacy Nspire compatibility mode (Default)"};
+
+    int fmt_ans =
+        gfx_window_confirm2("Output Format", fmt_lines, 4, "Zehn", "PRG");
+    int use_zehn = (fmt_ans == 0) ? 1 : 0;
+
+    int ret = assembler(infile, outfile, use_zehn);
+
+    for (int i = 0; i < num_cached_files; i++) {
+      free(file_cache[i].data);
+      file_cache[i].data = NULL;
+    }
+    num_cached_files = 0;
+
+    if (ret >= 0) {
+      char line1[MAX_PATH + 16];
+      char line2[48];
+
+      snprintf(line1, sizeof(line1), "Output: %s", outfile);
+      snprintf(line2, sizeof(line2), "Code size: %d bytes", ret);
+
+      const char *lines[] = {"Assembly successful.", line1, line2};
+
+      gfx_window_alert("NASM", lines, 3, "OK", 0);
+    } else {
+      gfx_window_scrolltext("Errors Found", (const char **)g_err_lines,
+                            g_num_err_lines, "Close");
+    }
+
+    clear_errors();
+
+    /* back to the file browser for the next assemble/fix cycle */
   }
-
-  char outfile[MAX_PATH];
-  make_outpath(infile, outfile, MAX_PATH);
-
-  const char *fmt_lines[] = {"Select output binary format:", "",
-                             "Zehn: Native CX II support (Recommended)",
-                             "PRG: Legacy Nspire compatibility mode (Default)"};
-
-  int fmt_ans =
-      gfx_window_confirm2("Output Format", fmt_lines, 4, "Zehn", "PRG");
-  int use_zehn = (fmt_ans == 0) ? 1 : 0;
-
-  int ret = assembler(infile, outfile, use_zehn);
-
-  for (int i = 0; i < num_cached_files; i++) {
-    free(file_cache[i].data);
-    file_cache[i].data = NULL;
-  }
-  num_cached_files = 0;
-
-  if (ret == 0) {
-    char line1[MAX_PATH + 16];
-    snprintf(line1, sizeof(line1), "Output: %s", outfile);
-    const char *lines[] = {"Assembly successful.", line1};
-    gfx_window_alert("NASM", lines, 2, "OK", 0);
-  } else {
-    gfx_window_scrolltext("Errors Found", (const char **)g_err_lines,
-                          g_num_err_lines, "Close");
-  }
-
-  clear_errors();
-  gfx_deinit();
-  return (ret == 0) ? 0 : 1;
 }

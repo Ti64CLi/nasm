@@ -268,7 +268,7 @@ static void gfx_draw_warning(int x, int y) {
   for (int row = 0; row < 11; row++) {
     for (int col = 0; col < 13; col++) {
       int dist = abs(col - 6);
-      if (dist <= row / 1.5) {
+      if (3 * dist <= 2 * row) { /* dist <= row/1.5 without soft-float */
         int px = x + col;
         int py = y + row;
         if (px >= 0 && px < GFX_W && py >= 0 && py < GFX_H) {

@@ -209,9 +209,9 @@ static void render(const char *path, int cursor, int scroll, int filter_asm) {
   char hint_buf[128];
   const char *hint;
   if (filter_asm) {
-    hint = "Tab: show all files";
+    hint = "Tab: show all files    Cat: settings";
   } else {
-    snprintf(hint_buf, sizeof(hint_buf), "Tab: show *.%s.tns",
+    snprintf(hint_buf, sizeof(hint_buf), "Tab: show *.%s.tns    Cat: settings",
              g_settings.asm_extension);
     hint = hint_buf;
   }
@@ -223,25 +223,6 @@ static void render(const char *path, int cursor, int scroll, int filter_asm) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Key helpers                                                       */
-/* ------------------------------------------------------------------ */
-static void wait_key_release_all(void) {
-  while (any_key_pressed()) {
-    msleep(20);
-    idle();
-  }
-}
-
-static void wait_debounce(t_key key) {
-  while (isKeyPressed(key)) {
-    msleep(15);
-    idle();
-  }
-  msleep(30);
-  idle();
-}
-
-/* ------------------------------------------------------------------ */
 /*  Public API                                                        */
 /* ------------------------------------------------------------------ */
 static char result_path[MAX_PATH];
@@ -250,6 +231,17 @@ const char *filebrowser_select(void) {
   char cur_path[MAX_PATH];
   strncpy(cur_path, "/documents", MAX_PATH - 1);
   cur_path[MAX_PATH - 1] = '\0';
+
+  /* start in the directory used last time, if it still exists */
+  if (g_settings.last_dir[0] == '/') {
+    DIR *d = opendir(g_settings.last_dir);
+
+    if (d) {
+      closedir(d);
+      strncpy(cur_path, g_settings.last_dir, MAX_PATH - 1);
+      cur_path[MAX_PATH - 1] = '\0';
+    }
+  }
   int cursor = 0;
   int scroll = 0;
   int filter_asm = 1;
@@ -296,6 +288,22 @@ const char *filebrowser_select(void) {
       scroll = 0;
 
       load_dir(cur_path, filter_asm);
+    } else if (nav == NAV_CAT) {
+      /* settings can open a nested browser (manual nasm path pick);
+       * don't allow settings-within-settings */
+      static int in_settings = 0;
+
+      if (!in_settings) {
+        in_settings = 1;
+        settings_ui_open();
+        in_settings = 0;
+
+        /* the extension filter may have changed */
+        cursor = 0;
+        scroll = 0;
+
+        load_dir(cur_path, filter_asm);
+      }
     } else if (nav == NAV_ENTER) {
       if (num_entries > 0) {
         if (entries[cursor].is_dir) {
@@ -321,6 +329,12 @@ const char *filebrowser_select(void) {
           strncpy(result_path, entries[cursor].fullpath, MAX_PATH - 1);
 
           result_path[MAX_PATH - 1] = '\0';
+
+          strncpy(g_settings.last_dir, cur_path,
+                  sizeof(g_settings.last_dir) - 1);
+          g_settings.last_dir[sizeof(g_settings.last_dir) - 1] = '\0';
+          settings_save();
+
           while (any_key_pressed()) {
             msleep(20);
             idle();
