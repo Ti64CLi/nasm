@@ -16,15 +16,23 @@ else
 	GCCFLAGS += -O0 -g
 endif
 
-OBJS = $(patsubst %.c, %.o, $(shell find . -name \*.c))
-OBJS += $(patsubst %.cpp, %.o, $(shell find . -name \*.cpp))
-OBJS += $(patsubst %.S, %.o, $(shell find . -name \*.S))
+# header dependency tracking
+GCCFLAGS += -MMD -MP
+
+OBJS = $(patsubst %.c, %.o, $(shell find . -path ./tests -prune -o -name \*.c -print))
+OBJS += $(patsubst %.cpp, %.o, $(shell find . -path ./tests -prune -o -name \*.cpp -print))
+OBJS += $(patsubst %.S, %.o, $(shell find . -path ./tests -prune -o -name \*.S -print))
 EXE = nasm
 DISTDIR = .
 vpath %.tns $(DISTDIR)
 vpath %.elf $(DISTDIR)
 
 all: $(EXE).tns
+
+test:
+	@sh tests/run_tests.sh
+
+.PHONY: all clean test
 
 %.o: %.c
 	$(GCC) $(GCCFLAGS) -c $< -o $@
@@ -45,4 +53,6 @@ $(EXE).tns: $(EXE).elf
 	rm $@.zehn
 
 clean:
-	rm -f $(OBJS) $(DISTDIR)/$(EXE).tns $(DISTDIR)/$(EXE).elf $(DISTDIR)/$(EXE).zehn
+	rm -f $(OBJS) $(OBJS:.o=.d) $(DISTDIR)/$(EXE).tns $(DISTDIR)/$(EXE).elf $(DISTDIR)/$(EXE).zehn
+
+-include $(OBJS:.o=.d)

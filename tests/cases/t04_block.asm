@@ -1,0 +1,22 @@
+start
+ LDMIA r0,{r1,r2,r3}
+ LDMIB r0!,{r1-r3}
+ LDMDA r0,{r1,r3-r5,r7}
+ LDMDB r0!,{r2,r4}
+ STMIA r1,{r2,r3}
+ STMIB r1!,{r2-r4}
+ STMDA r1,{r0,r5}
+ STMDB r1!,{r6,r7}
+ LDMFD sp!,{r0-r3,pc}
+ LDMED r2,{r3,r4}
+ LDMFA r2,{r3,r4}
+ LDMEA r2!,{r3,r4}
+ STMFD sp!,{r0-r3,lr}
+ STMED r3,{r4,r5}
+ STMFA r3,{r4,r5}
+ STMEA r3!,{r4,r5}
+ LDMEQIA r0,{r1,r2}
+ STMNEDB r1!,{r2,r3}
+ LDMFD sp,{r0-r14}^
+ STMFD sp,{r0,lr}^
+ LDMFD sp!,{r0-r3,pc}^

@@ -1,0 +1,30 @@
+start
+ MRS r0,CPSR
+ MRS r1,SPSR
+ MRSEQ r2,CPSR
+ MSR CPSR,r1
+ MSR CPSR_ALL,r2
+ MSR SPSR,r3
+ MSR CPSR_FLG,r4
+ MSR SPSR_FLG,#0xF0000000
+ MSRNE CPSR_FLG,#0x50000000
+ SWP r0,r1,[r2]
+ SWPB r3,r4,[r5]
+ SWPEQ r6,r7,[r8]
+ SWPNEB r9,r10,[r11]
+ CLZ r0,r1
+ CLZEQ r2,r3
+ SWI #0
+ SWI #0xABCDE
+ SWI 0x42
+ SWIEQ #1
+ SVC #2
+ MCR p15,0,r0,c1,c0,0
+ MCR p14,7,r1,c15,c2,5
+ MRC p15,0,r2,c0,c0
+ MRCEQ p10,3,r3,c4,c5,6
+ ADR r0,start
+ ADR r1,fin
+ ADREQ r2,start
+fin
+ BX lr

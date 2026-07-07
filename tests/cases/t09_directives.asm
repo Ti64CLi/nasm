@@ -1,0 +1,18 @@
+start
+ DCD 1,2,0xFFFFFFFF,-1,-2147483648
+ DCW 0,1,0xFFFF,-1,-32768
+ DCB 1,2,255,-1,-128,'A','z'
+ DCB "hello, world",0
+ DCB "semi;colon",';',10
+ ALIGN
+ DCD 0xCAFEBABE
+ DCB 1
+ ALIGN 8
+ DCD 3
+ DCB 2
+ ALIGN 4,2
+ DCW 0x1234
+ DCB 7
+ DCDU 0x11223344
+ DCWU 0x5566
+ INCBIN blob.bin

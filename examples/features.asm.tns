@@ -1,0 +1,43 @@
+;nasm feature demo: EQU, PUSH/POP, NOP, LDR=, literal pools
+;fills the top half of the screen green and the bottom half red,
+;waits a moment, then returns to the OS.
+;
+;assemble on-calc with nasm, then run features.tns from the doc browser
+
+LCD_BASE_PTR EQU 0xC0000010
+COLOR_GREEN2 EQU 0x07E007E0 ;two green RGB565 pixels packed in one word
+COLOR_RED EQU 0xF800        ;one red RGB565 pixel
+HALF_WORDS EQU 0x4B00       ;320*120*2/4 = 19200 words per half screen
+HALF_PIXELS EQU 0x9600      ;320*120   = 38400 pixels per half screen
+
+main
+    push {r4-r6,lr}
+    ldr r0,=LCD_BASE_PTR    ;named constant -> literal pool
+    ldr r4,[r0]             ;framebuffer address
+    nop
+
+    ldr r5,=COLOR_GREEN2
+    ldr r6,=HALF_WORDS
+topfill
+    str r5,[r4],#4          ;post-indexed word store
+    subs r6,r6,#1
+    bgt topfill
+
+    mov r5,#COLOR_RED       ;EQU constant used as immediate
+    ldr r6,=HALF_PIXELS
+bottomfill
+    strh r5,[r4],#2         ;post-indexed halfword store
+    subs r6,r6,#1
+    bgt bottomfill
+
+    bl wait
+    pop {r4-r6,pc}
+
+wait
+    ldr r0,=0x2000000       ;encodable: assembles as MOV r0,#0x2000000
+waitloop
+    subs r0,r0,#1
+    bgt waitloop
+    bx lr
+
+;the pending literals are emitted here automatically (or use LTORG)

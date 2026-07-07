@@ -1,0 +1,1 @@
+ADD MOV r0,r0
