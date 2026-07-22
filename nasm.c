@@ -5022,13 +5022,78 @@ static void assemble_and_report(const char *infile, const char *outfile) {
   clear_errors();
 }
 
-int main(int argc, char *argv[]) {
-  (void)argc;
-  (void)argv;
+/* Assemble a single file given directly on the command line (nStudio's
+   Assemble command).  Returns after reporting.  Skips the file browser
+   but keeps the ASM-extension warning and overwrite guard. */
+static void assemble_from_arg(const char *infile) {
+  int is_valid_ext = 0;
+  char ext_tns[64], ext_bare[64];
+  snprintf(ext_tns, sizeof(ext_tns), ".%s.tns", g_settings.asm_extension);
+  snprintf(ext_bare, sizeof(ext_bare), ".%s", g_settings.asm_extension);
+  size_t in_len = strlen(infile);
+  if (in_len >= strlen(ext_tns) &&
+      strcasecmp_s(infile + in_len - strlen(ext_tns), ext_tns) == 0)
+    is_valid_ext = 1;
+  else if (in_len >= strlen(ext_bare) &&
+           strcasecmp_s(infile + in_len - strlen(ext_bare), ext_bare) == 0)
+    is_valid_ext = 1;
 
+  if (!is_valid_ext) {
+    const char *warn_lines[] = {"The selected file does not match",
+                                "your configured ASM extension.",
+                                "",
+                                "It might not be a valid source file.",
+                                "",
+                                "Do you want to continue?"};
+    if (gfx_window_confirm2("   Warning", warn_lines, 6, "Continue",
+                            "Cancel") != 0)
+      return;
+  }
+
+  char outfile[MAX_PATH];
+  make_outpath(infile, outfile, MAX_PATH);
+  if (strcmp(outfile, infile) == 0) {
+    const char *err_lines[] = {"Output path would overwrite the input:",
+                               outfile, "",
+                               "Rename the source (e.g. name.asm.tns)."};
+    gfx_window_alert("NASM", err_lines, 4, "OK", 0);
+    return;
+  }
+
+  assemble_and_report(infile, outfile);
+}
+
+int main(int argc, char *argv[]) {
   settings_load();
 
+  /* Parse the command line.  nStudio invokes us as:
+       nasm <source> [extra flags] --fb <address>
+     The framebuffer address, when given, is the caller's screen buffer;
+     we seed our own with it so the editor shows behind our dialogs.
+     Unknown flags are ignored. */
+  const char *arg_infile = NULL;
+  const void *parent_fb = NULL;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--fb") == 0) {
+      if (i + 1 < argc)
+        parent_fb = (const void *)(uintptr_t)strtoul(argv[++i], NULL, 0);
+    } else if (argv[i][0] == '-') {
+      continue; /* unknown flag */
+    } else if (!arg_infile) {
+      arg_infile = argv[i];
+    }
+  }
+
   gfx_init();
+
+  if (arg_infile) {
+    if (parent_fb)
+      memcpy(gfx_framebuffer(), parent_fb,
+             (size_t)GFX_W * GFX_H * sizeof(uint16_t));
+    assemble_from_arg(arg_infile);
+    gfx_deinit();
+    return 0;
+  }
 
   for (;;) {
     const char *infile = NULL;

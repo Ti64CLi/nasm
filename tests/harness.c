@@ -21,6 +21,9 @@
 /* gfx / filebrowser stubs (host) */
 GfxTheme g_default_theme;
 
+static uint16_t stub_fb[320 * 240];
+uint16_t *gfx_framebuffer(void) { return stub_fb; }
+
 void gfx_init(void) {}
 void gfx_deinit(void) {}
 void gfx_window_alert(const char *t, const char **l, int n, const char *o,
