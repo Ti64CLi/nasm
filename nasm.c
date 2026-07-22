@@ -4984,6 +4984,44 @@ static void make_outpath(const char *infile, char *outbuf, size_t outmax) {
   }
 }
 
+/* Format-select + assemble + report for one already-chosen input file.
+   Shared by the interactive browser loop and the argv fast path. */
+static void assemble_and_report(const char *infile, const char *outfile) {
+  const char *fmt_lines[] = {
+      "Select output binary format:", "",
+      "Zehn: Native CX II support (Recommended)",
+      "PRG: Legacy Nspire compatibility mode (Default)"};
+
+  int fmt_ans =
+      gfx_window_confirm2("Output Format", fmt_lines, 4, "Zehn", "PRG");
+  int use_zehn = (fmt_ans == 0) ? 1 : 0;
+
+  int ret = assembler(infile, outfile, use_zehn);
+
+  for (int i = 0; i < num_cached_files; i++) {
+    free(file_cache[i].data);
+    file_cache[i].data = NULL;
+  }
+  num_cached_files = 0;
+
+  if (ret >= 0) {
+    char line1[MAX_PATH + 16];
+    char line2[48];
+
+    snprintf(line1, sizeof(line1), "Output: %s", outfile);
+    snprintf(line2, sizeof(line2), "Code size: %d bytes", ret);
+
+    const char *lines[] = {"Assembly successful.", line1, line2};
+
+    gfx_window_alert("NASM", lines, 3, "OK", 0);
+  } else {
+    gfx_window_scrolltext("Errors Found", (const char **)g_err_lines,
+                          g_num_err_lines, "Close");
+  }
+
+  clear_errors();
+}
+
 int main(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
@@ -5051,39 +5089,7 @@ int main(int argc, char *argv[]) {
       break;
     }
 
-    const char *fmt_lines[] = {
-        "Select output binary format:", "",
-        "Zehn: Native CX II support (Recommended)",
-        "PRG: Legacy Nspire compatibility mode (Default)"};
-
-    int fmt_ans =
-        gfx_window_confirm2("Output Format", fmt_lines, 4, "Zehn", "PRG");
-    int use_zehn = (fmt_ans == 0) ? 1 : 0;
-
-    int ret = assembler(infile, outfile, use_zehn);
-
-    for (int i = 0; i < num_cached_files; i++) {
-      free(file_cache[i].data);
-      file_cache[i].data = NULL;
-    }
-    num_cached_files = 0;
-
-    if (ret >= 0) {
-      char line1[MAX_PATH + 16];
-      char line2[48];
-
-      snprintf(line1, sizeof(line1), "Output: %s", outfile);
-      snprintf(line2, sizeof(line2), "Code size: %d bytes", ret);
-
-      const char *lines[] = {"Assembly successful.", line1, line2};
-
-      gfx_window_alert("NASM", lines, 3, "OK", 0);
-    } else {
-      gfx_window_scrolltext("Errors Found", (const char **)g_err_lines,
-                            g_num_err_lines, "Close");
-    }
-
-    clear_errors();
+    assemble_and_report(infile, outfile);
 
     /* back to the file browser for the next assemble/fix cycle */
   }
